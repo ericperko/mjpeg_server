@@ -1,0 +1,11 @@
+<package>
+  <description brief="frontier based exploration">A node that provides frontier based exploration.</description>
+  <author>Benjamin Pitzer</author>
+  <license>BSD</license>
+  <review status="unreviewed" notes=""/>
+  <url>http://ros.org/wiki/explore</url>
+  <depend package="roscpp"/>
+  <depend package="std_msgs"/>
+  <depend package="roslib"/>
+  
+</package>
