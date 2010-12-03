@@ -37,7 +37,12 @@
 #define MJPEG_SERVER_H_
 
 #include <ros/ros.h>
+#include <sensor_msgs/Image.h>
+#include <image_transport/image_transport.h>
+#include <cv_bridge/CvBridge.h>
+
 #include <boost/thread/mutex.hpp>
+#include <boost/thread/condition.hpp>
 
 #define IO_BUFFER 256
 #define BUFFER_SIZE 1024
@@ -63,7 +68,7 @@
  * since i observed caching of files from time to time.
  */
 #define STD_HEADER "Connection: close\r\n" \
-    "Server: MJPG-Streamer/0.2\r\n" \
+    "Server: mjpeg_server\r\n" \
     "Cache-Control: no-store, no-cache, must-revalidate, pre-check=0, post-check=0, max-age=0\r\n" \
     "Pragma: no-cache\r\n" \
     "Expires: Mon, 3 Jan 2000 12:34:56 GMT\r\n"
@@ -104,13 +109,9 @@ static const struct {
 /* the webserver determines between these values for an answer */
 typedef enum {
     A_UNKNOWN,
-    A_SNAPSHOT,
     A_STREAM,
-    A_COMMAND,
     A_FILE,
-    A_INPUT_JSON,
-    A_OUTPUT_JSON,
-    A_PROGRAM_JSON,
+    A_TOPIC,
 } answer_t;
 
 /*
@@ -131,6 +132,22 @@ typedef struct {
 } iobuffer;
 
 /**
+ * @class ImageBuffer
+ * @brief
+ */
+class ImageBuffer {
+public:
+  ImageBuffer() : size_(0),time_stamp_(0),buffer_(NULL),buffer_size_(0) {
+  }
+  int size_;
+  double time_stamp_;
+  char* buffer_;
+  int buffer_size_;
+  boost::condition_variable condition_;
+  boost::mutex mutex_;
+};
+
+/**
  * @class MJPEGServer
  * @brief
  */
@@ -140,7 +157,7 @@ public:
    * @brief  Constructor
    * @return
    */
-  MJPEGServer();
+  MJPEGServer(ros::NodeHandle& node);
 
   /**
    * @brief  Destructor - Cleans up
@@ -166,15 +183,16 @@ public:
   void client(int fd);
 
 private:
+  void imageCallback(const sensor_msgs::ImageConstPtr& msg, const std::string& topic);
+
   /**
    * @brief  Make a global plan
    */
   void makePlan();
 
   void send_error(int fd, int which, char *message);
-  void send_stream(int fd);
+  void send_stream(int fd, ImageBuffer* image_buffer);
   void send_file(int fd, char *parameter);
-
 
   void init_iobuffer(iobuffer *iobuf);
   void init_request(request *req);
@@ -185,8 +203,10 @@ private:
   int hex_char_to_int(char in);
   int unescape(char *string);
 
-
   ros::NodeHandle node_;
+  sensor_msgs::CvBridge bridge_;
+  image_transport::ImageTransport image_transport_;
+
 
   boost::mutex client_mutex_;
   int port_;
@@ -195,16 +215,12 @@ private:
   int sd_len;
 
   bool stop_requested_;
-  char* credentials_;
   char* www_folder_;
 
-  boost::condition_variable image_process_condition;
-  boost::mutex image_process_mutex;
-
-  int image_size_;
-  double image_time_stamp_;
-  char* image_buffer_;
-
+  typedef std::map<std::string, ImageBuffer*> ImageBufferMap;
+  ImageBufferMap image_buffers_;
+  typedef std::map<std::string, image_transport::Subscriber> ImageSubscriberMap;
+  ImageSubscriberMap image_subscribers_;
 
 };
 

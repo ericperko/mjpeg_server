@@ -33,6 +33,9 @@
  *  POSSIBILITY OF SUCH DAMAGE.
  *
  *********************************************************************/
+#include "mjpeg_server/mjpeg_server.h"
+#include <highgui.h>
+
 #include <sys/ioctl.h>
 #include <errno.h>
 #include <signal.h>
@@ -48,8 +51,6 @@
 #include <boost/thread.hpp>
 #include <boost/bind.hpp>
 
-#include "mjpeg_server/mjpeg_server.h"
-
 #define ABS(a) (((a) < 0) ? -(a) : (a))
 #ifndef MIN
 #define MIN(a, b) (((a) < (b)) ? (a) : (b))
@@ -61,8 +62,8 @@
 
 namespace mjpeg_server {
 
-MJPEGServer::MJPEGServer() :
-  node_(), stop_requested_(false), credentials_(NULL), www_folder_(NULL)
+MJPEGServer::MJPEGServer(ros::NodeHandle& node) :
+  node_(node), image_transport_(node), stop_requested_(false), www_folder_(NULL)
 {
   ros::NodeHandle private_nh("~");
   private_nh.param("port", port_, 8080);
@@ -70,6 +71,52 @@ MJPEGServer::MJPEGServer() :
 
 MJPEGServer::~MJPEGServer() {
   cleanUp();
+}
+
+void MJPEGServer::imageCallback(const sensor_msgs::ImageConstPtr& msg, const std::string& topic) {
+  IplImage *cv_image = NULL;
+  try {
+   if (bridge_.fromImage(*msg, "bgr8")) {
+     cv_image = bridge_.toIpl();
+   }
+   else {
+     ROS_ERROR("Unable to convert %s image to bgr8", msg->encoding.c_str());
+     return;
+   }
+  }
+  catch(...) {
+   ROS_ERROR("Unable to convert %s image to ipl format", msg->encoding.c_str());
+   return;
+  }
+
+  ImageBuffer* image_buffer = image_buffers_[topic];
+
+  // lock image buffer
+  boost::unique_lock<boost::mutex> lock(image_buffer->mutex_);
+
+  // encode image
+  cv::Mat img = cv_image;
+  std::vector<uchar> buffer;
+  cv::imencode(".jpeg", img, buffer);
+
+  int buffer_size = buffer.size();
+  if(buffer_size == 0)
+    return;
+
+  // check if image buffer is large enough, increase it if necessary
+  if(buffer_size > image_buffer->size_) {
+    ROS_DEBUG("increasing buffer size to %d\n", buffer_size);
+    image_buffer->buffer_ = (char*)realloc(image_buffer->buffer_, buffer_size);
+    image_buffer->buffer_size_ = buffer_size;
+  }
+
+  // copy image buffer
+  memcpy(image_buffer->buffer_, &buffer[0], buffer_size);
+  image_buffer->size_ = buffer_size;
+  image_buffer->time_stamp_ = msg->header.stamp.toSec();
+
+  // notify senders
+  image_buffer->condition_.notify_all();
 }
 
 /******************************************************************************
@@ -372,7 +419,7 @@ Description.: Send a complete HTTP response and a stream of JPG-frames.
 Input Value.: fildescriptor fd to send the answer to
 Return Value: -
 ******************************************************************************/
-void MJPEGServer::send_stream(int fd)
+void MJPEGServer::send_stream(int fd, ImageBuffer* image_buffer)
 {
     unsigned char *frame = NULL, *tmp = NULL;
     int frame_size = 0, max_frame_size = 0;
@@ -395,16 +442,13 @@ void MJPEGServer::send_stream(int fd)
 
     while(!stop_requested_) {
 
-//        /* wait for fresh frames */
-//        pthread_cond_wait(&pglobal->in[input_number].db_update, &pglobal->in[input_number].db);
-
         {
           /* wait for fresh frames */
-          boost::unique_lock<boost::mutex> lock(image_process_mutex);
-          image_process_condition.wait(lock);
+          boost::unique_lock<boost::mutex> lock(image_buffer->mutex_);
+          image_buffer->condition_.wait(lock);
 
           /* read buffer */
-          frame_size = image_size_;
+          frame_size = image_buffer->size_;
 
           /* check if framebuffer is large enough, increase it if necessary */
           if(frame_size > max_frame_size) {
@@ -413,7 +457,6 @@ void MJPEGServer::send_stream(int fd)
               max_frame_size = frame_size + TEN_K;
               if((tmp = (unsigned char*)realloc(frame, max_frame_size)) == NULL) {
                   free(frame);
-  //                pthread_mutex_unlock(&pglobal->in[input_number].db);
                   send_error(fd, 500, "not enough memory");
                   return;
               }
@@ -422,15 +465,12 @@ void MJPEGServer::send_stream(int fd)
           }
 
           /* copy v4l2_buffer timeval to user space */
-          ros::Time time(image_time_stamp_);
-          timestamp.tv_sec = time.sec;
+          ros::Time time(image_buffer->time_stamp_);
           timestamp.tv_sec = time.sec;
 
-          memcpy(frame, image_buffer_, frame_size);
+          memcpy(frame, image_buffer->buffer_, frame_size);
           ROS_DEBUG("got frame (size: %d kB)\n", frame_size / 1024);
         }
-
-//        pthread_mutex_unlock(&pglobal->in[input_number].db);
 
         /*
          * print the individual mimetype and the length
@@ -549,7 +589,6 @@ Description.: Serve a connected TCP-client. This thread function is called
 void MJPEGServer::client(int fd) {
   int cnt;
   char input_suffixed = 0;
-  int input_number = 0;
   char buffer[BUFFER_SIZE] = {0}, *pb = buffer;
   iobuffer iobuf;
   request req;
@@ -566,103 +605,54 @@ void MJPEGServer::client(int fd) {
   }
 
   /* determine what to deliver */
-  if(strstr(buffer, "GET /?action=snapshot") != NULL) {
-      req.type = A_SNAPSHOT;
-#ifdef WXP_COMPAT
-  } else if((strstr(buffer, "GET /cam") != NULL) && (strstr(buffer, ".jpg") != NULL)) {
-      req.type = A_SNAPSHOT;
-#endif
-      input_suffixed = 255;
-  } else if(strstr(buffer, "GET /?action=stream") != NULL) {
-      input_suffixed = 255;
-      req.type = A_STREAM;
-#ifdef WXP_COMPAT
-  } else if((strstr(buffer, "GET /cam") != NULL) && (strstr(buffer, ".mjpg") != NULL)) {
-      req.type = A_STREAM;
-#endif
-      input_suffixed = 255;
-  } else if((strstr(buffer, "GET /input") != NULL) && (strstr(buffer, ".json") != NULL)) {
-      req.type = A_INPUT_JSON;
-      input_suffixed = 255;
-  } else if((strstr(buffer, "GET /output") != NULL) && (strstr(buffer, ".json") != NULL)) {
-      req.type = A_OUTPUT_JSON;
-      input_suffixed = 255;
-  } else if(strstr(buffer, "GET /program.json") != NULL) {
-      req.type = A_PROGRAM_JSON;
-      input_suffixed = 255;
-  } else if(strstr(buffer, "GET /?action=command") != NULL) {
-      int len;
-      req.type = A_COMMAND;
+  if(strstr(buffer, "GET /?action=stream") != NULL) {
+    input_suffixed = 255;
+    req.type = A_STREAM;
+  } else if(strstr(buffer, "GET /?topic=") != NULL) {
+    int len;
+    input_suffixed = 255;
+    req.type = A_TOPIC;
 
-      /* advance by the length of known string */
-      if((pb = strstr(buffer, "GET /?action=command")) == NULL) {
-          ROS_DEBUG("HTTP request seems to be malformed\n");
-          send_error(fd, 400, "Malformed HTTP request");
-          close(fd);
-          return;
-      }
-      pb += strlen("GET /?action=command"); // a pb points to thestring after the first & after command
+    /* advance by the length of known string */
+    if((pb = strstr(buffer, "GET /?topic=")) == NULL) {
+        ROS_DEBUG("HTTP request seems to be malformed\n");
+        send_error(fd, 400, "Malformed HTTP request");
+        close(fd);
+        return;
+    }
+    pb += strlen("GET /?topic="); // a pb points to the string after the first & after command
+    len = MIN(MAX(strspn(pb, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ._/-1234567890"), 0), 100);
+    req.parameter = (char*)malloc(len + 1);
+    if(req.parameter == NULL) {
+        exit(EXIT_FAILURE);
+    }
+    memset(req.parameter, 0, len + 1);
+    strncpy(req.parameter, pb, len);
 
-      /* only accept certain characters */
-      len = MIN(MAX(strspn(pb, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_-=&1234567890%./"), 0), 100);
-
-      req.parameter = (char*)malloc(len + 1);
-      if(req.parameter == NULL) {
-          exit(EXIT_FAILURE);
-      }
-      memset(req.parameter, 0, len + 1);
-      strncpy(req.parameter, pb, len);
-
-      if(unescape(req.parameter) == -1) {
-          free(req.parameter);
-          send_error(fd, 500, "could not properly unescape command parameter string");
-          ROS_INFO("could not properly unescape command parameter string\n");
-          close(fd);
-          return;
-      }
-
-      ROS_DEBUG("command parameter (len: %d): \"%s\"\n", len, req.parameter);
+    ROS_DEBUG("requested image topic: \"%s\"\n", len, req.parameter);
   } else {
-      int len;
+    int len;
 
-      ROS_DEBUG("try to serve a file\n");
-      req.type = A_FILE;
+    ROS_DEBUG("try to serve a file\n");
+    req.type = A_FILE;
 
-      if((pb = strstr(buffer, "GET /")) == NULL) {
-          ROS_DEBUG("HTTP request seems to be malformed\n");
-          send_error(fd, 400, "Malformed HTTP request");
-          close(fd);
-          return;
-      }
+    if((pb = strstr(buffer, "GET /")) == NULL) {
+        ROS_DEBUG("HTTP request seems to be malformed\n");
+        send_error(fd, 400, "Malformed HTTP request");
+        close(fd);
+        return;
+    }
 
-      pb += strlen("GET /");
-      len = MIN(MAX(strspn(pb, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ._-1234567890"), 0), 100);
-      req.parameter = (char*)malloc(len + 1);
-      if(req.parameter == NULL) {
-          exit(EXIT_FAILURE);
-      }
-      memset(req.parameter, 0, len + 1);
-      strncpy(req.parameter, pb, len);
+    pb += strlen("GET /");
+    len = MIN(MAX(strspn(pb, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ._-1234567890"), 0), 100);
+    req.parameter = (char*)malloc(len + 1);
+    if(req.parameter == NULL) {
+        exit(EXIT_FAILURE);
+    }
+    memset(req.parameter, 0, len + 1);
+    strncpy(req.parameter, pb, len);
 
-      ROS_DEBUG("parameter (len: %d): \"%s\"\n", len, req.parameter);
-  }
-
-  /*
-   * Since when we are working with multiple input plugins
-   * there are some url which could have a _[plugin number suffix]
-   * For compatibility reasons it could be left in that case the output will be
-   * generated from the 0. input plugin
-   */
-  if(input_suffixed) {
-      char *sch = strchr(buffer, '_');
-      if(sch != NULL) {  // there is an _ in the url so the input number should be present
-          ROS_DEBUG("sch %s\n", sch + 1); // FIXME if more than 10 input plugin is added
-          char numStr[3];
-          memset(numStr, 0, 3);
-          strncpy(numStr, sch + 1, 1);
-          input_number = atoi(numStr);
-      }
-      ROS_DEBUG("input plugin_no: %d\n", input_number);
+    ROS_DEBUG("parameter (len: %d): \"%s\"\n", len, req.parameter);
   }
 
   /*
@@ -670,73 +660,65 @@ void MJPEGServer::client(int fd) {
    * the end of the request-header is marked by a single, empty line with "\r\n"
    */
   do {
-      memset(buffer, 0, sizeof(buffer));
+    memset(buffer, 0, sizeof(buffer));
 
-      if((cnt = _readline(fd, &iobuf, buffer, sizeof(buffer) - 1, 5)) == -1) {
-          free_request(&req);
-          close(fd);
-          return;
-      }
+    if((cnt = _readline(fd, &iobuf, buffer, sizeof(buffer) - 1, 5)) == -1) {
+        free_request(&req);
+        close(fd);
+        return;
+    }
 
-      if(strstr(buffer, "User-Agent: ") != NULL) {
-          req.client = strdup(buffer + strlen("User-Agent: "));
-      } else if(strstr(buffer, "Authorization: Basic ") != NULL) {
-          req.credentials = strdup(buffer + strlen("Authorization: Basic "));
-          decodeBase64(req.credentials);
-          ROS_DEBUG("username:password: %s\n", req.credentials);
-      }
+    if(strstr(buffer, "User-Agent: ") != NULL) {
+        req.client = strdup(buffer + strlen("User-Agent: "));
+    } else if(strstr(buffer, "Authorization: Basic ") != NULL) {
+        req.credentials = strdup(buffer + strlen("Authorization: Basic "));
+        decodeBase64(req.credentials);
+        ROS_DEBUG("username:password: %s\n", req.credentials);
+    }
 
   } while(cnt > 2 && !(buffer[0] == '\r' && buffer[1] == '\n'));
 
-  /* check for username and password if parameter -c was given */
-  if(credentials_ != NULL) {
-      if(req.credentials == NULL || strcmp(credentials_, req.credentials) != 0) {
-          ROS_DEBUG("access denied\n");
-          send_error(fd, 401, "username and password do not match to configuration");
-          close(fd);
-          if(req.parameter != NULL) free(req.parameter);
-          if(req.client != NULL) free(req.client);
-          if(req.credentials != NULL) free(req.credentials);
-          return;
-      }
-      ROS_DEBUG("access granted\n");
-  }
+
 
   /* now it's time to answer */
   switch(req.type) {
-//  case A_SNAPSHOT:
-//      ROS_DEBUG("Request for snapshot from input: %d\n", input_number);
-//      send_snapshot(fd, input_number);
-//      break;
-  case A_STREAM:
-      ROS_DEBUG("Request for stream from input: %d\n", input_number);
-      send_stream(fd);
+  case A_STREAM: {
+      ROS_DEBUG("Request for stream\n");
+
+      std::string topic = "/r_forearm_cam/image_color";
+
+      // Subscribe to topic if not already done
+      ImageSubscriberMap::iterator it = image_subscribers_.find(topic);
+      if (it == image_subscribers_.end()) {
+        image_subscribers_[topic] = image_transport_.subscribe(topic, 1, boost::bind(&MJPEGServer::imageCallback, this, _1, topic));
+        image_buffers_[topic] = new ImageBuffer();
+      }
+
+      send_stream(fd, image_buffers_[topic]);
       break;
-//  case A_COMMAND:
-//      if(lcfd.pc->conf.nocommands) {
-//          send_error(fd, 501, "this server is configured to not accept commands");
-//          break;
-//      }
-//      command(lcfd.pc->id, fd, req.parameter);
-//      break;
-//  case A_INPUT_JSON:
-//      ROS_DEBUG("Request for the Input plugin descriptor JSON file\n");
-//      send_Input_JSON(fd, input_number);
-//      break;
-//  case A_OUTPUT_JSON:
-//      ROS_DEBUG("Request for the Output plugin descriptor JSON file\n");
-//      send_Output_JSON(fd, input_number);
-//      break;
-//  case A_PROGRAM_JSON:
-//      ROS_DEBUG("Request for the program descriptor JSON file\n");
-//      send_Program_JSON(fd);
-//      break;
-  case A_FILE:
+  }
+  case A_TOPIC: {
+      ROS_DEBUG("Request for topic\n");
+
+      std::string topic = req.parameter;
+
+      // Subscribe to topic if not already done
+      ImageSubscriberMap::iterator it = image_subscribers_.find(topic);
+      if (it == image_subscribers_.end()) {
+        image_subscribers_[topic] = image_transport_.subscribe(topic, 1, boost::bind(&MJPEGServer::imageCallback, this, _1, topic));
+        image_buffers_[topic] = new ImageBuffer();
+      }
+
+      send_stream(fd, image_buffers_[topic]);
+      break;
+  }
+  case A_FILE: {
       if(www_folder_ == NULL)
           send_error(fd, 501, "no www-folder configured");
       else
           send_file(fd, req.parameter);
       break;
+  }
   default:
       ROS_DEBUG("unknown request\n");
   }
@@ -744,7 +726,7 @@ void MJPEGServer::client(int fd) {
   close(fd);
   free_request(&req);
 
-  ROS_DEBUG("leaving HTTP client thread\n");
+  ROS_INFO("Disconnecting HTTP client\n");
   return;
 }
 
@@ -902,7 +884,8 @@ void MJPEGServer::stop() {
 int main(int argc, char** argv){
   ros::init(argc, argv, "mjpeg_server");
 
-  mjpeg_server::MJPEGServer server;
+  ros::NodeHandle nh;
+  mjpeg_server::MJPEGServer server(nh);
   server.spin();
 
   return(0);
