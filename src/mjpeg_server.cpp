@@ -749,7 +749,7 @@ void MJPEGServer::execute() {
   hints.ai_socktype = SOCK_STREAM;
 
   int err;
-  snprintf(name, sizeof(name), "%d", htons(port_));
+  snprintf(name, sizeof(name), "%d", port_);
   if((err = getaddrinfo(NULL, name, &hints, &aip)) != 0) {
       perror(gai_strerror(err));
       exit(EXIT_FAILURE);
@@ -804,12 +804,12 @@ void MJPEGServer::execute() {
   sd_len = i;
 
   if(sd_len < 1) {
-      ROS_ERROR("Bind(%d) failed", htons(port_));
+      ROS_ERROR("Bind(%d) failed", port_);
       closelog();
       exit(EXIT_FAILURE);
   }
   else {
-      ROS_INFO("Bind(%d) succeeded", htons(port_));
+      ROS_INFO("Bind(%d) succeeded", port_);
   }
 
   /* create a child for every client that connects */
