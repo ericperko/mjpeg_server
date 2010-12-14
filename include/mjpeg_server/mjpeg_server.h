@@ -197,7 +197,7 @@ private:
   void init_iobuffer(iobuffer *iobuf);
   void init_request(request *req);
   void free_request(request *req);
-  int _read(int fd, iobuffer *iobuf, void *buffer, size_t len, int timeout);
+  int _read(int fd, iobuffer *iobuf, char *buffer, size_t len, int timeout);
   int _readline(int fd, iobuffer *iobuf, char *buffer, size_t len, int timeout);
   void decodeBase64(char *data);
   int hex_char_to_int(char in);
