@@ -173,7 +173,7 @@ Return Value: * buffer.: will become filled with bytes read
               * iobuf..: May get altered to save the context for future calls.
               * func().: bytes copied to buffer or -1 in case of error
 ******************************************************************************/
-int MJPEGServer::_read(int fd, iobuffer *iobuf, void *buffer, size_t len, int timeout)
+int MJPEGServer::_read(int fd, iobuffer *iobuf, char *buffer, size_t len, int timeout)
 {
     int copied = 0, rc, i;
     fd_set fds;
