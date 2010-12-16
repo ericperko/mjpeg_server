@@ -110,6 +110,7 @@ static const struct {
 typedef enum {
     A_UNKNOWN,
     A_STREAM,
+    A_SNAPSHOT,
     A_FILE,
     A_TOPIC,
 } answer_t;
@@ -193,6 +194,7 @@ private:
 
   void send_error(int fd, int which, char *message);
   void send_stream(int fd, ImageBuffer* image_buffer);
+  void send_snapshot(int fd, ImageBuffer* image_buffer);
   void send_file(int fd, char *parameter);
 
   void init_iobuffer(iobuffer *iobuf);

@@ -502,6 +502,55 @@ void MJPEGServer::send_stream(int fd, ImageBuffer* image_buffer)
 }
 
 /******************************************************************************
+Description.: Send a complete HTTP response and a single JPG-frame.
+Input Value.: fildescriptor fd to send the answer to
+Return Value: -
+******************************************************************************/
+void MJPEGServer::send_snapshot(int fd, ImageBuffer* image_buffer)
+{
+    unsigned char *frame = NULL;
+    int frame_size = 0;
+    char buffer[BUFFER_SIZE] = {0};
+    struct timeval timestamp;
+
+    /* wait for fresh frames */
+    boost::unique_lock<boost::mutex> lock(image_buffer->mutex_);
+    image_buffer->condition_.wait(lock);
+
+    /* read buffer */
+    frame_size = image_buffer->size_;
+
+    /* allocate a buffer for this single frame */
+    if((frame = (unsigned char*)malloc(frame_size + 1)) == NULL) {
+        free(frame);
+        send_error(fd, 500, "not enough memory");
+        return;
+    }
+    /* copy v4l2_buffer timeval to user space */
+    ros::Time time(image_buffer->time_stamp_);
+    timestamp.tv_sec = time.sec;
+
+    memcpy(frame, image_buffer->buffer_, frame_size);
+    ROS_DEBUG("got frame (size: %d kB)\n", frame_size / 1024);
+
+    /* write the response */
+    sprintf(buffer, "HTTP/1.0 200 OK\r\n" \
+            STD_HEADER \
+            "Content-type: image/jpeg\r\n" \
+            "X-Timestamp: %d.%06d\r\n" \
+            "\r\n", (int) timestamp.tv_sec, (int) timestamp.tv_usec);
+
+    /* send header and image now */
+    if(write(fd, buffer, strlen(buffer)) < 0 || \
+            write(fd, frame, frame_size) < 0) {
+        free(frame);
+        return;
+    }
+
+    free(frame);
+}
+
+/******************************************************************************
 Description.: Send HTTP header and copy the content of a file. To keep things
               simple, just a single folder gets searched for the file. Just
               files with known extension and supported mimetype get served.
@@ -614,6 +663,8 @@ void MJPEGServer::client(int fd) {
   if(strstr(buffer, "GET /?action=stream") != NULL) {
     input_suffixed = 255;
     req.type = A_STREAM;
+  } else if(strstr(buffer, "GET /snapshot") != NULL) {
+    req.type = A_SNAPSHOT;
   } else if(strstr(buffer, "GET /?topic=") != NULL) {
     int len;
     input_suffixed = 255;
