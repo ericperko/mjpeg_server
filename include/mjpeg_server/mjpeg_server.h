@@ -184,6 +184,7 @@ public:
 
 private:
   void imageCallback(const sensor_msgs::ImageConstPtr& msg, const std::string& topic);
+  void copyBuffer(std::vector<uchar>& buffer, const std::string& topic, const ros::Time& timestamp);
 
   /**
    * @brief  Make a global plan

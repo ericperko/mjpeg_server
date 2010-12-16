@@ -73,6 +73,33 @@ MJPEGServer::~MJPEGServer() {
   cleanUp();
 }
 
+void MJPEGServer::copyBuffer(std::vector<uchar>& buffer, const std::string& topic, const ros::Time& timestamp) {
+
+  ImageBuffer* image_buffer = image_buffers_[topic];
+
+  // lock image buffer
+  boost::unique_lock<boost::mutex> lock(image_buffer->mutex_);
+
+  int buffer_size = buffer.size();
+  if(buffer_size == 0)
+    return;
+
+  // check if image buffer is large enough, increase it if necessary
+  if(buffer_size > image_buffer->size_) {
+    ROS_DEBUG("increasing buffer size to %d\n", buffer_size);
+    image_buffer->buffer_ = (char*)realloc(image_buffer->buffer_, buffer_size);
+    image_buffer->buffer_size_ = buffer_size;
+  }
+
+  // copy image buffer
+  memcpy(image_buffer->buffer_, &buffer[0], buffer_size);
+  image_buffer->size_ = buffer_size;
+  image_buffer->time_stamp_ = timestamp.toSec();
+
+  // notify senders
+  image_buffer->condition_.notify_all();
+}
+
 void MJPEGServer::imageCallback(const sensor_msgs::ImageConstPtr& msg, const std::string& topic) {
   IplImage *cv_image = NULL;
   try {
@@ -89,34 +116,13 @@ void MJPEGServer::imageCallback(const sensor_msgs::ImageConstPtr& msg, const std
    return;
   }
 
-  ImageBuffer* image_buffer = image_buffers_[topic];
-
-  // lock image buffer
-  boost::unique_lock<boost::mutex> lock(image_buffer->mutex_);
-
   // encode image
   cv::Mat img = cv_image;
   std::vector<uchar> buffer;
   cv::imencode(".jpeg", img, buffer);
 
-  int buffer_size = buffer.size();
-  if(buffer_size == 0)
-    return;
-
-  // check if image buffer is large enough, increase it if necessary
-  if(buffer_size > image_buffer->size_) {
-    ROS_DEBUG("increasing buffer size to %d\n", buffer_size);
-    image_buffer->buffer_ = (char*)realloc(image_buffer->buffer_, buffer_size);
-    image_buffer->buffer_size_ = buffer_size;
-  }
-
   // copy image buffer
-  memcpy(image_buffer->buffer_, &buffer[0], buffer_size);
-  image_buffer->size_ = buffer_size;
-  image_buffer->time_stamp_ = msg->header.stamp.toSec();
-
-  // notify senders
-  image_buffer->condition_.notify_all();
+  copyBuffer(buffer, topic, msg->header.stamp);
 }
 
 /******************************************************************************
