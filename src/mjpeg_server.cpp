@@ -60,6 +60,33 @@
 #endif
 #define LENGTH_OF(x) (sizeof(x)/sizeof(x[0]))
 
+/* the boundary is used for the M-JPEG stream, it separates the multipart stream of pictures */
+#define BOUNDARY "boundarydonotcross"
+
+/*
+ * this defines the buffer size for a JPG-frame
+ * selecting to large values will allocate much wasted RAM for each buffer
+ * selecting to small values will lead to crashes due to to small buffers
+ */
+#define MAX_FRAME_SIZE (256*1024)
+#define TEN_K (10*1024)
+
+/*
+ * Standard header to be send along with other header information like mimetype.
+ *
+ * The parameters should ensure the browser does not cache our answer.
+ * A browser should connect for each file and not serve files from his cache.
+ * Using cached pictures would lead to showing old/outdated pictures
+ * Many browser seem to ignore, or at least not always obey those headers
+ * since i observed caching of files from time to time.
+ */
+#define STD_HEADER "Connection: close\r\n" \
+    "Server: mjpeg_server\r\n" \
+    "Cache-Control: no-store, no-cache, must-revalidate, pre-check=0, post-check=0, max-age=0\r\n" \
+    "Pragma: no-cache\r\n" \
+    "Expires: Mon, 3 Jan 2000 12:34:56 GMT\r\n"
+
+
 namespace mjpeg_server {
 
 MJPEGServer::MJPEGServer(ros::NodeHandle& node) :
@@ -73,75 +100,60 @@ MJPEGServer::~MJPEGServer() {
   cleanUp();
 }
 
-void MJPEGServer::copyBuffer(std::vector<uchar>& buffer, const std::string& topic, const ros::Time& timestamp) {
-
-  ImageBuffer* image_buffer = image_buffers_[topic];
-
-  // lock image buffer
-  boost::unique_lock<boost::mutex> lock(image_buffer->mutex_);
+void MJPEGServer::copyBuffer(std::vector<uchar>& buffer, ImageBuffer* image_buffer, const ros::Time& timestamp) {
 
   int buffer_size = buffer.size();
   if(buffer_size == 0)
     return;
 
   // check if image buffer is large enough, increase it if necessary
-  if(buffer_size > image_buffer->size_) {
-    ROS_DEBUG("increasing buffer size to %d\n", buffer_size);
+  if(buffer_size > image_buffer->buffer_size_) {
+    ROS_DEBUG("increasing buffer size to %d", buffer_size);
     image_buffer->buffer_ = (char*)realloc(image_buffer->buffer_, buffer_size);
     image_buffer->buffer_size_ = buffer_size;
   }
 
   // copy image buffer
   memcpy(image_buffer->buffer_, &buffer[0], buffer_size);
-  image_buffer->size_ = buffer_size;
   image_buffer->time_stamp_ = timestamp.toSec();
 
+}
+
+void MJPEGServer::imageCallback(const sensor_msgs::ImageConstPtr& msg, const std::string& topic) {
+
+  ImageBuffer* image_buffer = image_buffers_[topic];
+  boost::unique_lock<boost::mutex> lock(image_buffer->mutex_);
+  // copy image
+  image_buffer->msg = *msg;
   // notify senders
   image_buffer->condition_.notify_all();
 }
 
-void MJPEGServer::imageCallback(const sensor_msgs::ImageConstPtr& msg, const std::string& topic) {
-  IplImage *cv_image = NULL;
-  try {
-   if (bridge_.fromImage(*msg, "bgr8")) {
-     cv_image = bridge_.toIpl();
-   }
-   else {
-     ROS_ERROR("Unable to convert %s image to bgr8", msg->encoding.c_str());
-     return;
-   }
-  }
-  catch(...) {
-   ROS_ERROR("Unable to convert %s image to ipl format", msg->encoding.c_str());
-   return;
-  }
+void MJPEGServer::splitString(const std::string& str, std::vector<std::string>& tokens, const std::string& delimiter)
+{
+  // Skip delimiters at beginning.
+  std::string::size_type lastPos = str.find_first_not_of(delimiter, 0);
+  // Find first "non-delimiter".
+  std::string::size_type pos     = str.find_first_of(delimiter, lastPos);
 
-  // encode image
-  cv::Mat img = cv_image;
-  std::vector<uchar> buffer;
-  cv::imencode(".jpeg", img, buffer);
-
-  // copy image buffer
-  copyBuffer(buffer, topic, msg->header.stamp);
+  while (std::string::npos != pos || std::string::npos != lastPos)
+  {
+    // Found a token, add it to the vector.
+    tokens.push_back(str.substr(lastPos, pos - lastPos));
+    // Skip delimiters.  Note the "not_of"
+    lastPos = str.find_first_not_of(delimiter, pos);
+    // Find next "non-delimiter"
+    pos = str.find_first_of(delimiter, lastPos);
+  }
 }
 
-/******************************************************************************
-Description.: initializes the iobuffer structure properly
-Input Value.: pointer to already allocated iobuffer
-Return Value: iobuf
-******************************************************************************/
-void MJPEGServer::init_iobuffer(iobuffer *iobuf)
+void MJPEGServer::initIOBuffer(iobuffer *iobuf)
 {
     memset(iobuf->buffer, 0, sizeof(iobuf->buffer));
     iobuf->level = 0;
 }
 
-/******************************************************************************
-Description.: initializes the request structure properly
-Input Value.: pointer to already allocated req
-Return Value: req
-******************************************************************************/
-void MJPEGServer::init_request(request *req)
+void MJPEGServer::initRequest(request *req)
 {
     req->type        = A_UNKNOWN;
     req->type        = A_UNKNOWN;
@@ -150,36 +162,14 @@ void MJPEGServer::init_request(request *req)
     req->credentials = NULL;
 }
 
-/******************************************************************************
-Description.: If strings were assigned to the different members free them
-              This will fail if strings are static, so always use strdup().
-Input Value.: req: pointer to request structure
-Return Value: -
-******************************************************************************/
-void MJPEGServer::free_request(request *req)
+void MJPEGServer::freeRequest(request *req)
 {
     if(req->parameter != NULL) free(req->parameter);
     if(req->client != NULL) free(req->client);
     if(req->credentials != NULL) free(req->credentials);
 }
 
-/******************************************************************************
-Description.: read with timeout, implemented without using signals
-              tries to read len bytes and returns if enough bytes were read
-              or the timeout was triggered. In case of timeout the return
-              value may differ from the requested bytes "len".
-Input Value.: * fd.....: fildescriptor to read from
-              * iobuf..: iobuffer that allows to use this functions from multiple
-                         threads because the complete context is the iobuffer.
-              * buffer.: The buffer to store values at, will be set to zero
-                         before storing values.
-              * len....: the length of buffer
-              * timeout: seconds to wait for an answer
-Return Value: * buffer.: will become filled with bytes read
-              * iobuf..: May get altered to save the context for future calls.
-              * func().: bytes copied to buffer or -1 in case of error
-******************************************************************************/
-int MJPEGServer::_read(int fd, iobuffer *iobuf, char *buffer, size_t len, int timeout)
+int MJPEGServer::readWithTimeout(int fd, iobuffer *iobuf, char *buffer, size_t len, int timeout)
 {
     int copied = 0, rc, i;
     fd_set fds;
@@ -209,7 +199,7 @@ int MJPEGServer::_read(int fd, iobuffer *iobuf, char *buffer, size_t len, int ti
             return copied;
         }
 
-        init_iobuffer(iobuf);
+        initIOBuffer(iobuf);
 
         /*
          * there should be at least one byte, because select signalled it.
@@ -229,24 +219,7 @@ int MJPEGServer::_read(int fd, iobuffer *iobuf, char *buffer, size_t len, int ti
     return 0;
 }
 
-/******************************************************************************
-Description.: Read a single line from the provided fildescriptor.
-              This funtion will return under two conditions:
-              * line end was reached
-              * timeout occured
-Input Value.: * fd.....: fildescriptor to read from
-              * iobuf..: iobuffer that allows to use this functions from multiple
-                         threads because the complete context is the iobuffer.
-              * buffer.: The buffer to store values at, will be set to zero
-                         before storing values.
-              * len....: the length of buffer
-              * timeout: seconds to wait for an answer
-Return Value: * buffer.: will become filled with bytes read
-              * iobuf..: May get altered to save the context for future calls.
-              * func().: bytes copied to buffer or -1 in case of error
-******************************************************************************/
-/* read just a single line or timeout */
-int MJPEGServer::_readline(int fd, iobuffer *iobuf, char *buffer, size_t len, int timeout)
+int MJPEGServer::readLineWithTimeout(int fd, iobuffer *iobuf, char *buffer, size_t len, int timeout)
 {
     char c = '\0', *out = buffer;
     int i;
@@ -254,7 +227,7 @@ int MJPEGServer::_readline(int fd, iobuffer *iobuf, char *buffer, size_t len, in
     memset(buffer, 0, len);
 
     for(i = 0; i < len && c != '\n'; i++) {
-        if(_read(fd, iobuf, &c, 1, timeout) <= 0) {
+        if(readWithTimeout(fd, iobuf, &c, 1, timeout) <= 0) {
             /* timeout or error occured */
             return -1;
         }
@@ -264,14 +237,6 @@ int MJPEGServer::_readline(int fd, iobuffer *iobuf, char *buffer, size_t len, in
     return i;
 }
 
-/******************************************************************************
-Description.: Decodes the data and stores the result to the same buffer.
-              The buffer will be large enough, because base64 requires more
-              space then plain text.
-Hints.......: taken from busybox, but it is GPL code
-Input Value.: base64 encoded data
-Return Value: plain decoded data
-******************************************************************************/
 void MJPEGServer::decodeBase64(char *data)
 {
     const unsigned char *in = (const unsigned char *)data;
@@ -309,12 +274,7 @@ void MJPEGServer::decodeBase64(char *data)
     *data = '\0';
 }
 
-/******************************************************************************
-Description.: convert a hexadecimal ASCII character to integer
-Input Value.: ASCII character
-Return Value: corresponding value between 0 and 15, or -1 in case of error
-******************************************************************************/
-int MJPEGServer::hex_char_to_int(char in)
+int MJPEGServer::hexCharToInt(char in)
 {
     if(in >= '0' && in <= '9')
         return in - '0';
@@ -328,11 +288,6 @@ int MJPEGServer::hex_char_to_int(char in)
     return -1;
 }
 
-/******************************************************************************
-Description.: replace %XX with the character code it represents, URI
-Input Value.: string to unescape
-Return Value: 0 if everything is ok, -1 in case of error
-******************************************************************************/
 int MJPEGServer::unescape(char *string)
 {
     char *source = string, *destination = string;
@@ -358,9 +313,9 @@ int MJPEGServer::unescape(char *string)
         }
 
         /* perform replacement of %## with the corresponding character */
-        if((rc = hex_char_to_int(source[src+1])) == -1) return -1;
+        if((rc = hexCharToInt(source[src+1])) == -1) return -1;
         destination[dst] = rc * 16;
-        if((rc = hex_char_to_int(source[src+2])) == -1) return -1;
+        if((rc = hexCharToInt(source[src+2])) == -1) return -1;
         destination[dst] += rc;
 
         /* advance pointers, here is the reason why the resulting string is shorter */
@@ -373,7 +328,7 @@ int MJPEGServer::unescape(char *string)
     return 0;
 }
 
-void MJPEGServer::send_error(int fd, int which, char *message)
+void MJPEGServer::sendError(int fd, int which, const char *message)
 {
     char buffer[BUFFER_SIZE] = {0};
 
@@ -420,19 +375,47 @@ void MJPEGServer::send_error(int fd, int which, char *message)
     }
 }
 
-/******************************************************************************
-Description.: Send a complete HTTP response and a stream of JPG-frames.
-Input Value.: fildescriptor fd to send the answer to
-Return Value: -
-******************************************************************************/
-void MJPEGServer::send_stream(int fd, ImageBuffer* image_buffer)
+void MJPEGServer::decodeParameter(const std::string& parameter, ParameterMap& parameter_map)
+{
+  std::vector<std::string> parameter_value_pairs;
+  splitString(parameter,parameter_value_pairs, "?");
+
+  for(size_t i=0; i<parameter_value_pairs.size(); i++) {
+    std::vector<std::string> parameter_value;
+    splitString(parameter_value_pairs[i], parameter_value, "=");
+    if(parameter_value.size()==2) {
+      parameter_map.insert(std::make_pair(parameter_value[0],parameter_value[1]));
+    }
+  }
+}
+
+void MJPEGServer::sendStream(int fd, const char *parameter)
 {
     unsigned char *frame = NULL, *tmp = NULL;
     int frame_size = 0, max_frame_size = 0;
     char buffer[BUFFER_SIZE] = {0};
     struct timeval timestamp;
 
-    ROS_DEBUG("preparing header\n");
+    ROS_DEBUG("Decoding parameter");
+
+    std::string params = parameter;
+    ParameterMap parameter_map;
+    decodeParameter(params, parameter_map);
+
+    ParameterMap::iterator itp = parameter_map.find("topic");
+    if (itp == parameter_map.end()) return;
+
+    std::string topic = itp->second;
+
+    // Subscribe to topic if not already done
+    ImageSubscriberMap::iterator it = image_subscribers_.find(topic);
+    if (it == image_subscribers_.end()) {
+      image_subscribers_[topic] = image_transport_.subscribe(topic, 1, boost::bind(&MJPEGServer::imageCallback, this, _1, topic));
+      image_buffers_[topic] = new ImageBuffer();
+    }
+    ImageBuffer* image_buffer = image_buffers_[topic];
+
+    ROS_DEBUG("preparing header");
     sprintf(buffer, "HTTP/1.0 200 OK\r\n" \
             STD_HEADER \
             "Content-Type: multipart/x-mixed-replace;boundary=" BOUNDARY "\r\n" \
@@ -444,26 +427,48 @@ void MJPEGServer::send_stream(int fd, ImageBuffer* image_buffer)
         return;
     }
 
-    ROS_DEBUG("Headers send, sending stream now\n");
+    ROS_DEBUG("Headers send, sending stream now");
 
     while(!stop_requested_) {
-
         {
           /* wait for fresh frames */
           boost::unique_lock<boost::mutex> lock(image_buffer->mutex_);
           image_buffer->condition_.wait(lock);
 
+          IplImage* image;
+          try {
+           if (bridge_.fromImage(image_buffer->msg, "bgr8")) {
+             image = bridge_.toIpl();
+           }
+           else {
+             ROS_ERROR("Unable to convert %s image to bgr8", image_buffer->msg.encoding.c_str());
+             return;
+           }
+          }
+          catch(...) {
+           ROS_ERROR("Unable to convert %s image to ipl format", image_buffer->msg.encoding.c_str());
+           return;
+          }
+
+          // encode image
+          cv::Mat img = image;
+          std::vector<uchar> encoded_buffer;
+          cv::imencode(".jpeg", img, encoded_buffer);
+
+          // copy image buffer
+          copyBuffer(encoded_buffer, image_buffer, ros::Time::now());
+
           /* read buffer */
-          frame_size = image_buffer->size_;
+          frame_size = image_buffer->buffer_size_;
 
           /* check if framebuffer is large enough, increase it if necessary */
           if(frame_size > max_frame_size) {
-              ROS_DEBUG("increasing buffer size to %d\n", frame_size);
+              ROS_DEBUG("increasing buffer size to %d", frame_size);
 
               max_frame_size = frame_size + TEN_K;
               if((tmp = (unsigned char*)realloc(frame, max_frame_size)) == NULL) {
                   free(frame);
-                  send_error(fd, 500, "not enough memory");
+                  sendError(fd, 500, "not enough memory");
                   return;
               }
 
@@ -475,7 +480,7 @@ void MJPEGServer::send_stream(int fd, ImageBuffer* image_buffer)
           timestamp.tv_sec = time.sec;
 
           memcpy(frame, image_buffer->buffer_, frame_size);
-          ROS_DEBUG("got frame (size: %d kB)\n", frame_size / 1024);
+          ROS_DEBUG("got frame (size: %d kB)", frame_size / 1024);
         }
 
         /*
@@ -487,13 +492,13 @@ void MJPEGServer::send_stream(int fd, ImageBuffer* image_buffer)
                 "Content-Length: %d\r\n" \
                 "X-Timestamp: %d.%06d\r\n" \
                 "\r\n", frame_size, (int)timestamp.tv_sec, (int)timestamp.tv_usec);
-        ROS_DEBUG("sending intemdiate header\n");
+        ROS_DEBUG("sending intemdiate header");
         if(write(fd, buffer, strlen(buffer)) < 0) break;
 
-        ROS_DEBUG("sending frame\n");
+        ROS_DEBUG("sending frame");
         if(write(fd, frame, frame_size) < 0) break;
 
-        ROS_DEBUG("sending boundary\n");
+        ROS_DEBUG("sending boundary");
         sprintf(buffer, "\r\n--" BOUNDARY "\r\n");
         if(write(fd, buffer, strlen(buffer)) < 0) break;
     }
@@ -501,207 +506,120 @@ void MJPEGServer::send_stream(int fd, ImageBuffer* image_buffer)
     free(frame);
 }
 
-/******************************************************************************
-Description.: Send a complete HTTP response and a single JPG-frame.
-Input Value.: fildescriptor fd to send the answer to
-Return Value: -
-******************************************************************************/
-void MJPEGServer::send_snapshot(int fd, ImageBuffer* image_buffer)
+void MJPEGServer::sendSnapshot(int fd, const char *parameter)
 {
-    unsigned char *frame = NULL;
-    int frame_size = 0;
-    char buffer[BUFFER_SIZE] = {0};
-    struct timeval timestamp;
+  unsigned char *frame = NULL;
+  int frame_size = 0;
+  char buffer[BUFFER_SIZE] = {0};
+  struct timeval timestamp;
 
-    /* wait for fresh frames */
-    boost::unique_lock<boost::mutex> lock(image_buffer->mutex_);
-    image_buffer->condition_.wait(lock);
+  std::string params = parameter;
+  ParameterMap parameter_map;
+  decodeParameter(params, parameter_map);
 
-    /* read buffer */
-    frame_size = image_buffer->size_;
+  ParameterMap::iterator itp = parameter_map.find("topic");
+  if (itp == parameter_map.end()) return;
 
-    /* allocate a buffer for this single frame */
-    if((frame = (unsigned char*)malloc(frame_size + 1)) == NULL) {
-        free(frame);
-        send_error(fd, 500, "not enough memory");
-        return;
-    }
-    /* copy v4l2_buffer timeval to user space */
-    ros::Time time(image_buffer->time_stamp_);
-    timestamp.tv_sec = time.sec;
+  std::string topic = itp->second;
 
-    memcpy(frame, image_buffer->buffer_, frame_size);
-    ROS_DEBUG("got frame (size: %d kB)\n", frame_size / 1024);
+  // Subscribe to topic if not already done
+  ImageSubscriberMap::iterator it = image_subscribers_.find(topic);
+  if (it == image_subscribers_.end()) {
+   image_subscribers_[topic] = image_transport_.subscribe(topic, 1, boost::bind(&MJPEGServer::imageCallback, this, _1, topic));
+   image_buffers_[topic] = new ImageBuffer();
+  }
+  ImageBuffer* image_buffer = image_buffers_[topic];
 
-    /* write the response */
-    sprintf(buffer, "HTTP/1.0 200 OK\r\n" \
-            STD_HEADER \
-            "Content-type: image/jpeg\r\n" \
-            "X-Timestamp: %d.%06d\r\n" \
-            "\r\n", (int) timestamp.tv_sec, (int) timestamp.tv_usec);
+  /* wait for fresh frames */
+  boost::unique_lock<boost::mutex> lock(image_buffer->mutex_);
+  image_buffer->condition_.wait(lock);
 
-    /* send header and image now */
-    if(write(fd, buffer, strlen(buffer)) < 0 || \
-            write(fd, frame, frame_size) < 0) {
-        free(frame);
-        return;
-    }
+  IplImage* image;
+  try {
+   if (bridge_.fromImage(image_buffer->msg, "bgr8")) {
+     image = bridge_.toIpl();
+   }
+   else {
+     ROS_ERROR("Unable to convert %s image to bgr8", image_buffer->msg.encoding.c_str());
+     return;
+   }
+  }
+  catch(...) {
+   ROS_ERROR("Unable to convert %s image to ipl format", image_buffer->msg.encoding.c_str());
+   return;
+  }
 
-    free(frame);
+  // encode image
+  cv::Mat img = image;
+  std::vector<uchar> encoded_buffer;
+  cv::imencode(".jpeg", img, encoded_buffer);
+
+  // copy image buffer
+  copyBuffer(encoded_buffer, image_buffer, ros::Time::now());
+
+  /* read buffer */
+  frame_size = image_buffer->buffer_size_;
+
+  /* allocate a buffer for this single frame */
+  if((frame = (unsigned char*)malloc(frame_size + 1)) == NULL) {
+      free(frame);
+      sendError(fd, 500, "not enough memory");
+      return;
+  }
+  /* copy v4l2_buffer timeval to user space */
+  ros::Time time(image_buffer->time_stamp_);
+  timestamp.tv_sec = time.sec;
+
+  memcpy(frame, image_buffer->buffer_, frame_size);
+  ROS_DEBUG("got frame (size: %d kB)", frame_size / 1024);
+
+  /* write the response */
+  sprintf(buffer, "HTTP/1.0 200 OK\r\n" \
+          STD_HEADER \
+          "Content-type: image/jpeg\r\n" \
+          "X-Timestamp: %d.%06d\r\n" \
+          "\r\n", (int) timestamp.tv_sec, (int) timestamp.tv_usec);
+
+  /* send header and image now */
+  if(write(fd, buffer, strlen(buffer)) < 0 || \
+          write(fd, frame, frame_size) < 0) {
+      free(frame);
+      return;
+  }
+
+  free(frame);
 }
 
-/******************************************************************************
-Description.: Send HTTP header and copy the content of a file. To keep things
-              simple, just a single folder gets searched for the file. Just
-              files with known extension and supported mimetype get served.
-              If no parameter was given, the file "index.html" will be copied.
-Input Value.: * fd.......: filedescriptor to send data to
-              * parameter: string that consists of the filename
-              * id.......: specifies which server-context is the right one
-Return Value: -
-******************************************************************************/
-void MJPEGServer::send_file(int fd, char *parameter)
-{
-    char buffer[BUFFER_SIZE] = {0};
-    char *extension, *mimetype = NULL;
-    int i, lfd;
-
-    /* in case no parameter was given */
-    if(parameter == NULL || strlen(parameter) == 0)
-        parameter = "index.html";
-
-    /* find file-extension */
-    char * pch;
-    pch = strchr(parameter, '.');
-    int lastDot = 0;
-    while(pch != NULL) {
-        lastDot = pch - parameter;
-        pch = strchr(pch + 1, '.');
-    }
-
-    if(lastDot == 0) {
-        send_error(fd, 400, "No file extension found");
-        return;
-    } else {
-        extension = parameter + lastDot;
-        ROS_DEBUG("%s EXTENSION: %s\n", parameter, extension);
-    }
-
-    /* determine mime-type */
-    for(i = 0; i < LENGTH_OF(mimetypes); i++) {
-        if(strcmp(mimetypes[i].dot_extension, extension) == 0) {
-            mimetype = (char *)mimetypes[i].mimetype;
-            break;
-        }
-    }
-
-    /* in case of unknown mimetype or extension leave */
-    if(mimetype == NULL) {
-        send_error(fd, 404, "MIME-TYPE not known");
-        return;
-    }
-
-    /* now filename, mimetype and extension are known */
-    ROS_DEBUG("trying to serve file \"%s\", extension: \"%s\" mime: \"%s\"\n", parameter, extension, mimetype);
-
-    /* build the absolute path to the file */
-    strncat(buffer, www_folder_, sizeof(buffer) - 1);
-    strncat(buffer, parameter, sizeof(buffer) - strlen(buffer) - 1);
-
-    /* try to open that file */
-    if((lfd = open(buffer, O_RDONLY)) < 0) {
-        ROS_DEBUG("file %s not accessible\n", buffer);
-        send_error(fd, 404, "Could not open file");
-        return;
-    }
-    ROS_DEBUG("opened file: %s\n", buffer);
-
-    /* prepare HTTP header */
-    sprintf(buffer, "HTTP/1.0 200 OK\r\n" \
-            "Content-type: %s\r\n" \
-            STD_HEADER \
-            "\r\n", mimetype);
-    i = strlen(buffer);
-
-    /* first transmit HTTP-header, afterwards transmit content of file */
-    do {
-        if(write(fd, buffer, i) < 0) {
-            close(lfd);
-            return;
-        }
-    } while((i = read(lfd, buffer, sizeof(buffer))) > 0);
-
-    /* close file, job done */
-    close(lfd);
-}
-
-/******************************************************************************
-Description.: Serve a connected TCP-client. This thread function is called
-              for each connect of a HTTP client like a webbrowser. It determines
-              if it is a valid HTTP request and dispatches between the different
-              response options.
-******************************************************************************/
 void MJPEGServer::client(int fd) {
   int cnt;
-  char input_suffixed = 0;
   char buffer[BUFFER_SIZE] = {0}, *pb = buffer;
   iobuffer iobuf;
   request req;
 
   /* initializes the structures */
-  init_iobuffer(&iobuf);
-  init_request(&req);
+  initIOBuffer(&iobuf);
+  initRequest(&req);
 
   /* What does the client want to receive? Read the request. */
   memset(buffer, 0, sizeof(buffer));
-  if((cnt = _readline(fd, &iobuf, buffer, sizeof(buffer) - 1, 5)) == -1) {
+  if((cnt = readLineWithTimeout(fd, &iobuf, buffer, sizeof(buffer) - 1, 5)) == -1) {
       close(fd);
       return;
   }
 
   /* determine what to deliver */
-  if(strstr(buffer, "GET /?action=stream") != NULL) {
-    input_suffixed = 255;
+  if(strstr(buffer, "GET /?") != NULL) {
     req.type = A_STREAM;
-  } else if(strstr(buffer, "GET /snapshot") != NULL) {
-    req.type = A_SNAPSHOT;
-  } else if(strstr(buffer, "GET /?topic=") != NULL) {
-    int len;
-    input_suffixed = 255;
-    req.type = A_TOPIC;
 
     /* advance by the length of known string */
-    if((pb = strstr(buffer, "GET /?topic=")) == NULL) {
-        ROS_DEBUG("HTTP request seems to be malformed\n");
-        send_error(fd, 400, "Malformed HTTP request");
-        close(fd);
-        return;
-    }
-    pb += strlen("GET /?topic="); // a pb points to the string after the first & after command
-    len = MIN(MAX(strspn(pb, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ._/-1234567890"), 0), 100);
-    req.parameter = (char*)malloc(len + 1);
-    if(req.parameter == NULL) {
-        exit(EXIT_FAILURE);
-    }
-    memset(req.parameter, 0, len + 1);
-    strncpy(req.parameter, pb, len);
-
-    ROS_DEBUG("requested image topic: \"%s\"\n", len, req.parameter);
-  } else {
-    int len;
-
-    ROS_DEBUG("try to serve a file\n");
-    req.type = A_FILE;
-
     if((pb = strstr(buffer, "GET /")) == NULL) {
-        ROS_DEBUG("HTTP request seems to be malformed\n");
-        send_error(fd, 400, "Malformed HTTP request");
+        ROS_DEBUG("HTTP request seems to be malformed");
+        sendError(fd, 400, "Malformed HTTP request");
         close(fd);
         return;
     }
-
-    pb += strlen("GET /");
-    len = MIN(MAX(strspn(pb, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ._-1234567890"), 0), 100);
+    pb += strlen("GET /"); // a pb points to the string after the first & after command
+    int len = MIN(MAX(strspn(pb, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ._/-1234567890?="), 0), 100);
     req.parameter = (char*)malloc(len + 1);
     if(req.parameter == NULL) {
         exit(EXIT_FAILURE);
@@ -709,7 +627,49 @@ void MJPEGServer::client(int fd) {
     memset(req.parameter, 0, len + 1);
     strncpy(req.parameter, pb, len);
 
-    ROS_DEBUG("parameter (len: %d): \"%s\"\n", len, req.parameter);
+    ROS_DEBUG("requested image topic: \"%s\"", len, req.parameter);
+  }
+  else if(strstr(buffer, "GET /stream?") != NULL) {
+    req.type = A_STREAM;
+
+    /* advance by the length of known string */
+    if((pb = strstr(buffer, "GET /stream")) == NULL) {
+        ROS_DEBUG("HTTP request seems to be malformed");
+        sendError(fd, 400, "Malformed HTTP request");
+        close(fd);
+        return;
+    }
+    pb += strlen("GET /stream"); // a pb points to the string after the first & after command
+    int len = MIN(MAX(strspn(pb, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ._/-1234567890?="), 0), 100);
+    req.parameter = (char*)malloc(len + 1);
+    if(req.parameter == NULL) {
+        exit(EXIT_FAILURE);
+    }
+    memset(req.parameter, 0, len + 1);
+    strncpy(req.parameter, pb, len);
+
+    ROS_DEBUG("requested image topic: \"%s\"", len, req.parameter);
+  }
+  else if(strstr(buffer, "GET /snapshot?") != NULL) {
+    req.type = A_SNAPSHOT;
+
+    /* advance by the length of known string */
+    if((pb = strstr(buffer, "GET /snapshot")) == NULL) {
+        ROS_DEBUG("HTTP request seems to be malformed");
+        sendError(fd, 400, "Malformed HTTP request");
+        close(fd);
+        return;
+    }
+    pb += strlen("GET /snapshot"); // a pb points to the string after the first & after command
+    int len = MIN(MAX(strspn(pb, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ._/-1234567890?="), 0), 100);
+    req.parameter = (char*)malloc(len + 1);
+    if(req.parameter == NULL) {
+        exit(EXIT_FAILURE);
+    }
+    memset(req.parameter, 0, len + 1);
+    strncpy(req.parameter, pb, len);
+
+    ROS_DEBUG("requested image topic: \"%s\"", len, req.parameter);
   }
 
   /*
@@ -719,8 +679,8 @@ void MJPEGServer::client(int fd) {
   do {
     memset(buffer, 0, sizeof(buffer));
 
-    if((cnt = _readline(fd, &iobuf, buffer, sizeof(buffer) - 1, 5)) == -1) {
-        free_request(&req);
+    if((cnt = readLineWithTimeout(fd, &iobuf, buffer, sizeof(buffer) - 1, 5)) == -1) {
+        freeRequest(&req);
         close(fd);
         return;
     }
@@ -730,7 +690,7 @@ void MJPEGServer::client(int fd) {
     } else if(strstr(buffer, "Authorization: Basic ") != NULL) {
         req.credentials = strdup(buffer + strlen("Authorization: Basic "));
         decodeBase64(req.credentials);
-        ROS_DEBUG("username:password: %s\n", req.credentials);
+        ROS_DEBUG("username:password: %s", req.credentials);
     }
 
   } while(cnt > 2 && !(buffer[0] == '\r' && buffer[1] == '\n'));
@@ -740,50 +700,23 @@ void MJPEGServer::client(int fd) {
   /* now it's time to answer */
   switch(req.type) {
   case A_STREAM: {
-      ROS_DEBUG("Request for stream\n");
-
-      std::string topic = "/r_forearm_cam/image_color";
-
-      // Subscribe to topic if not already done
-      ImageSubscriberMap::iterator it = image_subscribers_.find(topic);
-      if (it == image_subscribers_.end()) {
-        image_subscribers_[topic] = image_transport_.subscribe(topic, 1, boost::bind(&MJPEGServer::imageCallback, this, _1, topic));
-        image_buffers_[topic] = new ImageBuffer();
-      }
-
-      send_stream(fd, image_buffers_[topic]);
+      ROS_DEBUG("Request for streaming");
+      sendStream(fd, req.parameter);
       break;
   }
-  case A_TOPIC: {
-      ROS_DEBUG("Request for topic\n");
-
-      std::string topic = req.parameter;
-
-      // Subscribe to topic if not already done
-      ImageSubscriberMap::iterator it = image_subscribers_.find(topic);
-      if (it == image_subscribers_.end()) {
-        image_subscribers_[topic] = image_transport_.subscribe(topic, 1, boost::bind(&MJPEGServer::imageCallback, this, _1, topic));
-        image_buffers_[topic] = new ImageBuffer();
-      }
-
-      send_stream(fd, image_buffers_[topic]);
-      break;
-  }
-  case A_FILE: {
-      if(www_folder_ == NULL)
-          send_error(fd, 501, "no www-folder configured");
-      else
-          send_file(fd, req.parameter);
+  case A_SNAPSHOT: {
+      ROS_DEBUG("Request for snapshot");
+      sendSnapshot(fd, req.parameter);
       break;
   }
   default:
-      ROS_DEBUG("unknown request\n");
+      ROS_DEBUG("unknown request");
   }
 
   close(fd);
-  free_request(&req);
+  freeRequest(&req);
 
-  ROS_INFO("Disconnecting HTTP client\n");
+  ROS_INFO("Disconnecting HTTP client");
   return;
 }
 
@@ -812,7 +745,7 @@ void MJPEGServer::execute() {
       exit(EXIT_FAILURE);
   }
 
-  for(int i = 0; i < MAX_SD_LEN; i++)
+  for(int i = 0; i < MAX_NUM_SOCKETS; i++)
       sd[i] = -1;
 
 
@@ -850,7 +783,7 @@ void MJPEGServer::execute() {
           sd[i] = -1;
       } else {
           i++;
-          if(i >= MAX_SD_LEN) {
+          if(i >= MAX_NUM_SOCKETS) {
               ROS_ERROR("Maximum number of server sockets exceeded");
               i--;
               break;
@@ -869,15 +802,15 @@ void MJPEGServer::execute() {
       ROS_INFO("Bind(%d) succeeded", port_);
   }
 
+  ROS_INFO("waiting for clients to connect");
+
   /* create a child for every client that connects */
   while(!stop_requested_) {
-
-      ROS_INFO("waiting for clients to connect");
 
       do {
           FD_ZERO(&selectfds);
 
-          for(i = 0; i < MAX_SD_LEN; i++) {
+          for(i = 0; i < MAX_NUM_SOCKETS; i++) {
               if(sd[i] != -1) {
                   FD_SET(sd[i], &selectfds);
 
@@ -901,7 +834,7 @@ void MJPEGServer::execute() {
               int fd = accept(sd[i], (struct sockaddr *)&client_addr, &addr_len);
 
               /* start new thread that will handle this TCP connected client */
-              ROS_DEBUG("create thread to handle client that just established a connection\n");
+              ROS_DEBUG("create thread to handle client that just established a connection");
 
               if(getnameinfo((struct sockaddr *)&client_addr, addr_len, name, sizeof(name), NULL, 0, NI_NUMERICHOST) == 0) {
                   syslog(LOG_INFO, "serving client: %s\n", name);
@@ -913,14 +846,14 @@ void MJPEGServer::execute() {
       }
   }
 
-  ROS_INFO("leaving server thread, calling cleanup function now\n");
+  ROS_INFO("leaving server thread, calling cleanup function now");
   cleanUp();
 }
 
 void MJPEGServer::cleanUp() {
   ROS_INFO("cleaning up ressources allocated by server thread");
 
-  for(int i = 0; i < MAX_SD_LEN; i++)
+  for(int i = 0; i < MAX_NUM_SOCKETS; i++)
       close(sd[i]);
 }
 

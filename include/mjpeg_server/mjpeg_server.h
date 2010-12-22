@@ -44,75 +44,21 @@
 #include <boost/thread/mutex.hpp>
 #include <boost/thread/condition.hpp>
 
-#define IO_BUFFER 256
-#define BUFFER_SIZE 1024
-
-/* the boundary is used for the M-JPEG stream, it separates the multipart stream of pictures */
-#define BOUNDARY "boundarydonotcross"
-
-/*
- * this defines the buffer size for a JPG-frame
- * selecting to large values will allocate much wasted RAM for each buffer
- * selecting to small values will lead to crashes due to to small buffers
- */
-#define MAX_FRAME_SIZE (256*1024)
-#define TEN_K (10*1024)
-
-/*
- * Standard header to be send along with other header information like mimetype.
- *
- * The parameters should ensure the browser does not cache our answer.
- * A browser should connect for each file and not serve files from his cache.
- * Using cached pictures would lead to showing old/outdated pictures
- * Many browser seem to ignore, or at least not always obey those headers
- * since i observed caching of files from time to time.
- */
-#define STD_HEADER "Connection: close\r\n" \
-    "Server: mjpeg_server\r\n" \
-    "Cache-Control: no-store, no-cache, must-revalidate, pre-check=0, post-check=0, max-age=0\r\n" \
-    "Pragma: no-cache\r\n" \
-    "Expires: Mon, 3 Jan 2000 12:34:56 GMT\r\n"
-
 /*
  * Maximum number of server sockets (i.e. protocol families) to listen.
  */
-#define MAX_SD_LEN 50
+#define MAX_NUM_SOCKETS    100
+#define IO_BUFFER     256
+#define BUFFER_SIZE   1024
 
 namespace mjpeg_server {
 
-/*
- * Only the following fileypes are supported.
- *
- * Other filetypes are simply ignored!
- * This table is a 1:1 mapping of files extension to a certain mimetype.
- */
-static const struct {
-    const char *dot_extension;
-    const char *mimetype;
-} mimetypes[] = {
-    { ".html", "text/html" },
-    { ".htm",  "text/html" },
-    { ".css",  "text/css" },
-    { ".js",   "text/javascript" },
-    { ".txt",  "text/plain" },
-    { ".jpg",  "image/jpeg" },
-    { ".jpeg", "image/jpeg" },
-    { ".png",  "image/png"},
-    { ".gif",  "image/gif" },
-    { ".ico",  "image/x-icon" },
-    { ".swf",  "application/x-shockwave-flash" },
-    { ".cab",  "application/x-shockwave-flash" },
-    { ".jar",  "application/java-archive" },
-    { ".json", "application/json" }
-};
 
 /* the webserver determines between these values for an answer */
 typedef enum {
     A_UNKNOWN,
     A_STREAM,
     A_SNAPSHOT,
-    A_FILE,
-    A_TOPIC,
 } answer_t;
 
 /*
@@ -138,12 +84,12 @@ typedef struct {
  */
 class ImageBuffer {
 public:
-  ImageBuffer() : size_(0),time_stamp_(0),buffer_(NULL),buffer_size_(0) {
+  ImageBuffer() : time_stamp_(0),buffer_size_(0),buffer_(NULL) {
   }
-  int size_;
   double time_stamp_;
-  char* buffer_;
   int buffer_size_;
+  char* buffer_;
+  sensor_msgs::Image msg;
   boost::condition_variable condition_;
   boost::mutex mutex_;
 };
@@ -171,58 +117,169 @@ public:
    * @param feedback Feedback that the action gives to a higher-level monitor, in this case, the position of the robot
    * @return The result of the execution, ie: Success, Preempted, Aborted, etc.
    */
-//  virtual robot_actions::ResultStatus execute(const ExploreGoal& goal, ExploreFeedback& feedback);
   void execute();
 
-  // start server
+  /**
+   * @brief  Starts the server and spins
+   */
   void spin();
-  // stop server
+
+  /**
+   * @brief  Stops the server
+   */
   void stop();
-  // closes client threads
+
+  /**
+   * @brief  Closes all client threads
+   */
   void cleanUp();
-  // client thread
+
+  /**
+   * @brief  Client thread function
+   *         Serve a connected TCP-client. This thread function is called
+   *         for each connect of a HTTP client like a webbrowser. It determines
+   *         if it is a valid HTTP request and dispatches between the different
+   *         response options.
+   */
   void client(int fd);
 
 private:
+  typedef std::map<std::string, ImageBuffer*> ImageBufferMap;
+  typedef std::map<std::string, image_transport::Subscriber> ImageSubscriberMap;
+  typedef std::map<std::string, std::string> ParameterMap;
+
   void imageCallback(const sensor_msgs::ImageConstPtr& msg, const std::string& topic);
-  void copyBuffer(std::vector<uchar>& buffer, const std::string& topic, const ros::Time& timestamp);
+  void copyBuffer(std::vector<uchar>& buffer, ImageBuffer* image_buffer, const ros::Time& timestamp);
 
   /**
-   * @brief  Make a global plan
+   * @brief Send an error message.
+   * @param fildescriptor fd to send the answer to
+   * @param error number
+   * @param error message
    */
-  void makePlan();
+  void sendError(int fd, int which, const char *message);
 
-  void send_error(int fd, int which, char *message);
-  void send_stream(int fd, ImageBuffer* image_buffer);
-  void send_snapshot(int fd, ImageBuffer* image_buffer);
-  void send_file(int fd, char *parameter);
+  /**
+   * @brief Send a complete HTTP response and a stream of JPG-frames.
+   * @param fildescriptor fd to send the answer to
+   * @param parameter string
+   */
+  void sendStream(int fd, const char *parameter);
 
-  void init_iobuffer(iobuffer *iobuf);
-  void init_request(request *req);
-  void free_request(request *req);
-  int _read(int fd, iobuffer *iobuf, char *buffer, size_t len, int timeout);
-  int _readline(int fd, iobuffer *iobuf, char *buffer, size_t len, int timeout);
+  /**
+   * @brief Send a complete HTTP response and a single JPG-frame.
+   * @param fildescriptor fd to send the answer to
+   * @param parameter string
+   */
+  void sendSnapshot(int fd, const char *parameter);
+
+  /**
+   * @brief Initializes the iobuffer structure properly
+   * @param Pointer to already allocated iobuffer
+   */
+  void initIOBuffer(iobuffer *iobuf);
+
+  /**
+   * @brief Initializes the request structure properly
+   * @param Pointer to already allocated req
+   */
+  void initRequest(request *req);
+
+  /**
+   * @brief If strings were assigned to the different members free them.
+   *        This will fail if strings are static, so always use strdup().
+   * @param req: pointer to request structure
+   */
+  void freeRequest(request *req);
+
+  /**
+   * @brief read with timeout, implemented without using signals
+   *        tries to read len bytes and returns if enough bytes were read
+   *        or the timeout was triggered. In case of timeout the return
+   *        value may differ from the requested bytes "len".
+   * @param fd.....: fildescriptor to read from
+   * @param iobuf..: iobuffer that allows to use this functions from multiple
+   *                 threads because the complete context is the iobuffer.
+   * @param buffer.: The buffer to store values at, will be set to zero
+                     before storing values.
+   * @param len....: the length of buffer
+   * @param timeout: seconds to wait for an answer
+   * @return buffer.: will become filled with bytes read
+   * @return iobuf..: May get altered to save the context for future calls.
+   * @return func().: bytes copied to buffer or -1 in case of error
+   */
+  int readWithTimeout(int fd, iobuffer *iobuf, char *buffer, size_t len, int timeout);
+
+  /**
+   * @brief Read a single line from the provided fildescriptor.
+   *        This funtion will return under two conditions:
+   *        - line end was reached
+   *        - timeout occured
+   * @param fd.....: fildescriptor to read from
+   * @param iobuf..: iobuffer that allows to use this functions from multiple
+   *                 threads because the complete context is the iobuffer.
+   * @param buffer.: The buffer to store values at, will be set to zero
+                     before storing values.
+   * @param len....: the length of buffer
+   * @param timeout: seconds to wait for an answer
+   * @return buffer.: will become filled with bytes read
+   * @return iobuf..: May get altered to save the context for future calls.
+   * @return func().: bytes copied to buffer or -1 in case of error
+   */
+  int readLineWithTimeout(int fd, iobuffer *iobuf, char *buffer, size_t len, int timeout);
+
+  /**
+   * @brief Decodes the data and stores the result to the same buffer.
+   *        The buffer will be large enough, because base64 requires more
+   *        space then plain text.
+   * @param base64 encoded data
+   * @return plain decoded data
+   */
   void decodeBase64(char *data);
-  int hex_char_to_int(char in);
+
+  /**
+   * @brief Convert a hexadecimal ASCII character to integer
+   * @param ASCII character
+   * @return corresponding value between 0 and 15, or -1 in case of error
+   */
+  int hexCharToInt(char in);
+
+  /**
+   * @brief Replaces %XX with the character code it represents, URI
+   * @param string to unescape
+   * @return 0 if everything is ok, -1 in case of error
+   */
   int unescape(char *string);
+
+  /**
+   * @brief Split string into a list of tokens
+   * @param string to split
+   * @return vector of tokens
+   */
+  void splitString(const std::string& str, std::vector<std::string>& tokens, const std::string& delimiter = " ");
+
+  /**
+   * @brief Decodes URI parameters in form of ?parameter=value
+   * @param URI string
+   * @return a map of parameter/value pairs
+   */
+  void decodeParameter(const std::string& parameter, ParameterMap& parameter_map);
+
 
   ros::NodeHandle node_;
   sensor_msgs::CvBridge bridge_;
   image_transport::ImageTransport image_transport_;
 
-
   boost::mutex client_mutex_;
   int port_;
 
-  int sd[MAX_SD_LEN];
+  int sd[MAX_NUM_SOCKETS];
   int sd_len;
 
   bool stop_requested_;
   char* www_folder_;
 
-  typedef std::map<std::string, ImageBuffer*> ImageBufferMap;
   ImageBufferMap image_buffers_;
-  typedef std::map<std::string, image_transport::Subscriber> ImageSubscriberMap;
   ImageSubscriberMap image_subscribers_;
 
 };
