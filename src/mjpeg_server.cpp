@@ -147,6 +147,18 @@ void MJPEGServer::splitString(const std::string& str, std::vector<std::string>& 
   }
 }
 
+int MJPEGServer::stringToInt(const std::string& str, const int default_value)
+{
+  int value;
+  int res;
+  if(str.length() == 0)
+    return default_value;
+  res = sscanf(str.c_str(),"%i",&value);
+  if (res == 1)
+    return value;
+  return default_value;
+}
+
 void MJPEGServer::initIOBuffer(iobuffer *iobuf)
 {
     memset(iobuf->buffer, 0, sizeof(iobuf->buffer));
@@ -453,7 +465,24 @@ void MJPEGServer::sendStream(int fd, const char *parameter)
           // encode image
           cv::Mat img = image;
           std::vector<uchar> encoded_buffer;
-          cv::imencode(".jpeg", img, encoded_buffer);
+
+          // resize image
+          if(parameter_map.find("width") != parameter_map.end() && parameter_map.find("height") != parameter_map.end()) {
+            int width = stringToInt(parameter_map["width"]);
+            int height = stringToInt(parameter_map["height"]);
+            if(width > 0 && height > 0) {
+              cv::Mat img_resized;
+              cv::Size new_size(width,height);
+              cv::resize(img, img_resized, new_size);
+              cv::imencode(".jpeg", img_resized, encoded_buffer);
+            }
+            else {
+              cv::imencode(".jpeg", img, encoded_buffer);
+            }
+          }
+          else {
+            cv::imencode(".jpeg", img, encoded_buffer);
+          }
 
           // copy image buffer
           copyBuffer(encoded_buffer, image_buffer, ros::Time::now());
@@ -549,10 +578,26 @@ void MJPEGServer::sendSnapshot(int fd, const char *parameter)
    return;
   }
 
-  // encode image
   cv::Mat img = image;
   std::vector<uchar> encoded_buffer;
-  cv::imencode(".jpeg", img, encoded_buffer);
+
+  // resize image
+  if(parameter_map.find("width") != parameter_map.end() && parameter_map.find("height") != parameter_map.end()) {
+    int width = stringToInt(parameter_map["width"]);
+    int height = stringToInt(parameter_map["height"]);
+    if(width > 0 && height > 0) {
+      cv::Mat img_resized;
+      cv::Size new_size(width,height);
+      cv::resize(img, img_resized, new_size);
+      cv::imencode(".jpeg", img_resized, encoded_buffer);
+    }
+    else {
+      cv::imencode(".jpeg", img, encoded_buffer);
+    }
+  }
+  else {
+    cv::imencode(".jpeg", img, encoded_buffer);
+  }
 
   // copy image buffer
   copyBuffer(encoded_buffer, image_buffer, ros::Time::now());

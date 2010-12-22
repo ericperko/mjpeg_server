@@ -259,6 +259,14 @@ private:
   void splitString(const std::string& str, std::vector<std::string>& tokens, const std::string& delimiter = " ");
 
   /**
+   * @brief Convert a string to an integer
+   * @param string
+   * @param default return value
+   * @return corresponding value, default_value in case of error
+   */
+  int stringToInt(const std::string& str, const int default_value = 0);
+
+  /**
    * @brief Decodes URI parameters in form of ?parameter=value
    * @param URI string
    * @return a map of parameter/value pairs
