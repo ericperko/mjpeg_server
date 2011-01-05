@@ -102,26 +102,25 @@ MJPEGServer::~MJPEGServer() {
 
 void MJPEGServer::copyBuffer(std::vector<uchar>& buffer, ImageBuffer* image_buffer, const ros::Time& timestamp) {
 
-  int buffer_size = buffer.size();
-  if(buffer_size == 0)
-    return;
-
-  // check if image buffer is large enough, increase it if necessary
-  if(buffer_size > image_buffer->buffer_size_) {
-    ROS_DEBUG("increasing buffer size to %d", buffer_size);
-    image_buffer->buffer_ = (char*)realloc(image_buffer->buffer_, buffer_size);
-    image_buffer->buffer_size_ = buffer_size;
-  }
-
-  // copy image buffer
-  memcpy(image_buffer->buffer_, &buffer[0], buffer_size);
-  image_buffer->time_stamp_ = timestamp.toSec();
-
+//  int buffer_size = buffer.size();
+//  if(buffer_size == 0)
+//    return;
+//
+//  // check if image buffer is large enough, increase it if necessary
+//  if(buffer_size > image_buffer->buffer_size_) {
+//    ROS_DEBUG("increasing buffer size to %d", buffer_size);
+//    image_buffer->buffer_ = (char*)realloc(image_buffer->buffer_, buffer_size);
+//    image_buffer->buffer_size_ = buffer_size;
+//  }
+//
+//  // copy image buffer
+//  memcpy(image_buffer->buffer_, &buffer[0], buffer_size);
+//  image_buffer->time_stamp_ = timestamp.toSec();
 }
 
 void MJPEGServer::imageCallback(const sensor_msgs::ImageConstPtr& msg, const std::string& topic) {
 
-  ImageBuffer* image_buffer = image_buffers_[topic];
+  ImageBuffer* image_buffer = getImageBuffer(topic);
   boost::unique_lock<boost::mutex> lock(image_buffer->mutex_);
   // copy image
   image_buffer->msg = *msg;
@@ -401,12 +400,26 @@ void MJPEGServer::decodeParameter(const std::string& parameter, ParameterMap& pa
   }
 }
 
+ImageBuffer* MJPEGServer::getImageBuffer(const std::string& topic)
+{
+  boost::unique_lock<boost::mutex> lock(image_maps_mutex_);
+  ImageSubscriberMap::iterator it = image_subscribers_.find(topic);
+  if (it == image_subscribers_.end()) {
+    image_subscribers_[topic] = image_transport_.subscribe(topic, 1, boost::bind(&MJPEGServer::imageCallback, this, _1, topic));
+    image_buffers_[topic] = new ImageBuffer();
+    ROS_INFO("Subscribing to topic %s", topic.c_str());
+  }
+  ImageBuffer* image_buffer = image_buffers_[topic];
+  return image_buffer;
+}
+
 void MJPEGServer::sendStream(int fd, const char *parameter)
 {
     unsigned char *frame = NULL, *tmp = NULL;
     int frame_size = 0, max_frame_size = 0;
     char buffer[BUFFER_SIZE] = {0};
     struct timeval timestamp;
+    sensor_msgs::CvBridge image_bridge;
 
     ROS_DEBUG("Decoding parameter");
 
@@ -418,14 +431,7 @@ void MJPEGServer::sendStream(int fd, const char *parameter)
     if (itp == parameter_map.end()) return;
 
     std::string topic = itp->second;
-
-    // Subscribe to topic if not already done
-    ImageSubscriberMap::iterator it = image_subscribers_.find(topic);
-    if (it == image_subscribers_.end()) {
-      image_subscribers_[topic] = image_transport_.subscribe(topic, 1, boost::bind(&MJPEGServer::imageCallback, this, _1, topic));
-      image_buffers_[topic] = new ImageBuffer();
-    }
-    ImageBuffer* image_buffer = image_buffers_[topic];
+    ImageBuffer* image_buffer = getImageBuffer(topic);
 
     ROS_DEBUG("preparing header");
     sprintf(buffer, "HTTP/1.0 200 OK\r\n" \
@@ -449,8 +455,8 @@ void MJPEGServer::sendStream(int fd, const char *parameter)
 
           IplImage* image;
           try {
-           if (bridge_.fromImage(image_buffer->msg, "bgr8")) {
-             image = bridge_.toIpl();
+           if (image_bridge.fromImage(image_buffer->msg, "bgr8")) {
+             image = image_bridge.toIpl();
            }
            else {
              ROS_ERROR("Unable to convert %s image to bgr8", image_buffer->msg.encoding.c_str());
@@ -484,15 +490,12 @@ void MJPEGServer::sendStream(int fd, const char *parameter)
             cv::imencode(".jpeg", img, encoded_buffer);
           }
 
-          // copy image buffer
-          copyBuffer(encoded_buffer, image_buffer, ros::Time::now());
+          // copy encoded frame buffer
+          frame_size = encoded_buffer.size();
 
-          /* read buffer */
-          frame_size = image_buffer->buffer_size_;
-
-          /* check if framebuffer is large enough, increase it if necessary */
+          /* check if frame buffer is large enough, increase it if necessary */
           if(frame_size > max_frame_size) {
-              ROS_DEBUG("increasing buffer size to %d", frame_size);
+              ROS_DEBUG("increasing frame buffer size to %d", frame_size);
 
               max_frame_size = frame_size + TEN_K;
               if((tmp = (unsigned char*)realloc(frame, max_frame_size)) == NULL) {
@@ -500,15 +503,13 @@ void MJPEGServer::sendStream(int fd, const char *parameter)
                   sendError(fd, 500, "not enough memory");
                   return;
               }
-
               frame = tmp;
           }
 
           /* copy v4l2_buffer timeval to user space */
-          ros::Time time(image_buffer->time_stamp_);
-          timestamp.tv_sec = time.sec;
+          timestamp.tv_sec = ros::Time::now().toSec();
 
-          memcpy(frame, image_buffer->buffer_, frame_size);
+          memcpy(frame, &encoded_buffer[0], frame_size);
           ROS_DEBUG("got frame (size: %d kB)", frame_size / 1024);
         }
 
@@ -541,6 +542,7 @@ void MJPEGServer::sendSnapshot(int fd, const char *parameter)
   int frame_size = 0;
   char buffer[BUFFER_SIZE] = {0};
   struct timeval timestamp;
+  sensor_msgs::CvBridge image_bridge;
 
   std::string params = parameter;
   ParameterMap parameter_map;
@@ -550,14 +552,7 @@ void MJPEGServer::sendSnapshot(int fd, const char *parameter)
   if (itp == parameter_map.end()) return;
 
   std::string topic = itp->second;
-
-  // Subscribe to topic if not already done
-  ImageSubscriberMap::iterator it = image_subscribers_.find(topic);
-  if (it == image_subscribers_.end()) {
-   image_subscribers_[topic] = image_transport_.subscribe(topic, 1, boost::bind(&MJPEGServer::imageCallback, this, _1, topic));
-   image_buffers_[topic] = new ImageBuffer();
-  }
-  ImageBuffer* image_buffer = image_buffers_[topic];
+  ImageBuffer* image_buffer = getImageBuffer(topic);
 
   /* wait for fresh frames */
   boost::unique_lock<boost::mutex> lock(image_buffer->mutex_);
@@ -565,8 +560,8 @@ void MJPEGServer::sendSnapshot(int fd, const char *parameter)
 
   IplImage* image;
   try {
-   if (bridge_.fromImage(image_buffer->msg, "bgr8")) {
-     image = bridge_.toIpl();
+   if (image_bridge.fromImage(image_buffer->msg, "bgr8")) {
+     image = image_bridge.toIpl();
    }
    else {
      ROS_ERROR("Unable to convert %s image to bgr8", image_buffer->msg.encoding.c_str());
@@ -599,23 +594,20 @@ void MJPEGServer::sendSnapshot(int fd, const char *parameter)
     cv::imencode(".jpeg", img, encoded_buffer);
   }
 
-  // copy image buffer
-  copyBuffer(encoded_buffer, image_buffer, ros::Time::now());
+  // copy encoded frame buffer
+  frame_size = encoded_buffer.size();
 
-  /* read buffer */
-  frame_size = image_buffer->buffer_size_;
-
-  /* allocate a buffer for this single frame */
-  if((frame = (unsigned char*)malloc(frame_size + 1)) == NULL) {
+  // resize buffer
+  if((frame = (unsigned char*)malloc(frame_size)) == NULL) {
       free(frame);
       sendError(fd, 500, "not enough memory");
       return;
   }
-  /* copy v4l2_buffer timeval to user space */
-  ros::Time time(image_buffer->time_stamp_);
-  timestamp.tv_sec = time.sec;
 
-  memcpy(frame, image_buffer->buffer_, frame_size);
+  /* copy v4l2_buffer timeval to user space */
+  timestamp.tv_sec = ros::Time::now().toSec();
+
+  memcpy(frame, &encoded_buffer[0], frame_size);
   ROS_DEBUG("got frame (size: %d kB)", frame_size / 1024);
 
   /* write the response */

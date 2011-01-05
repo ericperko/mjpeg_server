@@ -84,11 +84,7 @@ typedef struct {
  */
 class ImageBuffer {
 public:
-  ImageBuffer() : time_stamp_(0),buffer_size_(0),buffer_(NULL) {
-  }
-  double time_stamp_;
-  int buffer_size_;
-  char* buffer_;
+  ImageBuffer() {}
   sensor_msgs::Image msg;
   boost::condition_variable condition_;
   boost::mutex mutex_;
@@ -147,6 +143,9 @@ private:
   typedef std::map<std::string, ImageBuffer*> ImageBufferMap;
   typedef std::map<std::string, image_transport::Subscriber> ImageSubscriberMap;
   typedef std::map<std::string, std::string> ParameterMap;
+
+  ImageBuffer* getImageBuffer(const std::string& topic);
+
 
   void imageCallback(const sensor_msgs::ImageConstPtr& msg, const std::string& topic);
   void copyBuffer(std::vector<uchar>& buffer, ImageBuffer* image_buffer, const ros::Time& timestamp);
@@ -275,10 +274,7 @@ private:
 
 
   ros::NodeHandle node_;
-  sensor_msgs::CvBridge bridge_;
   image_transport::ImageTransport image_transport_;
-
-  boost::mutex client_mutex_;
   int port_;
 
   int sd[MAX_NUM_SOCKETS];
@@ -289,6 +285,7 @@ private:
 
   ImageBufferMap image_buffers_;
   ImageSubscriberMap image_subscribers_;
+  boost::mutex image_maps_mutex_;
 
 };
 
