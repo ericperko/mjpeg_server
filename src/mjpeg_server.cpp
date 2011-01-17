@@ -471,6 +471,15 @@ void MJPEGServer::sendStream(int fd, const char *parameter)
           // encode image
           cv::Mat img = image;
           std::vector<uchar> encoded_buffer;
+          std::vector<int> encode_params;
+
+          // quality
+          int quality = 95;
+          if(parameter_map.find("quality") != parameter_map.end()) {
+            quality = stringToInt(parameter_map["quality"]);
+          }
+          encode_params.push_back(CV_IMWRITE_JPEG_QUALITY);
+          encode_params.push_back(quality);
 
           // resize image
           if(parameter_map.find("width") != parameter_map.end() && parameter_map.find("height") != parameter_map.end()) {
@@ -480,14 +489,14 @@ void MJPEGServer::sendStream(int fd, const char *parameter)
               cv::Mat img_resized;
               cv::Size new_size(width,height);
               cv::resize(img, img_resized, new_size);
-              cv::imencode(".jpeg", img_resized, encoded_buffer);
+              cv::imencode(".jpeg", img_resized, encoded_buffer, encode_params);
             }
             else {
-              cv::imencode(".jpeg", img, encoded_buffer);
+              cv::imencode(".jpeg", img, encoded_buffer, encode_params);
             }
           }
           else {
-            cv::imencode(".jpeg", img, encoded_buffer);
+            cv::imencode(".jpeg", img, encoded_buffer, encode_params);
           }
 
           // copy encoded frame buffer
@@ -575,6 +584,15 @@ void MJPEGServer::sendSnapshot(int fd, const char *parameter)
 
   cv::Mat img = image;
   std::vector<uchar> encoded_buffer;
+  std::vector<int> encode_params;
+
+  // quality
+  int quality = 95;
+  if(parameter_map.find("quality") != parameter_map.end()) {
+    quality = stringToInt(parameter_map["quality"]);
+  }
+  encode_params.push_back(CV_IMWRITE_JPEG_QUALITY);
+  encode_params.push_back(quality);
 
   // resize image
   if(parameter_map.find("width") != parameter_map.end() && parameter_map.find("height") != parameter_map.end()) {
@@ -584,14 +602,14 @@ void MJPEGServer::sendSnapshot(int fd, const char *parameter)
       cv::Mat img_resized;
       cv::Size new_size(width,height);
       cv::resize(img, img_resized, new_size);
-      cv::imencode(".jpeg", img_resized, encoded_buffer);
+      cv::imencode(".jpeg", img_resized, encoded_buffer, encode_params);
     }
     else {
-      cv::imencode(".jpeg", img, encoded_buffer);
+      cv::imencode(".jpeg", img, encoded_buffer, encode_params);
     }
   }
   else {
-    cv::imencode(".jpeg", img, encoded_buffer);
+    cv::imencode(".jpeg", img, encoded_buffer, encode_params);
   }
 
   // copy encoded frame buffer
