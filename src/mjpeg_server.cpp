@@ -389,7 +389,7 @@ void MJPEGServer::sendError(int fd, int which, const char *message)
 void MJPEGServer::decodeParameter(const std::string& parameter, ParameterMap& parameter_map)
 {
   std::vector<std::string> parameter_value_pairs;
-  splitString(parameter,parameter_value_pairs, "?");
+  splitString(parameter,parameter_value_pairs, "?&");
 
   for(size_t i=0; i<parameter_value_pairs.size(); i++) {
     std::vector<std::string> parameter_value;
