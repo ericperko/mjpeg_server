@@ -151,6 +151,13 @@ private:
   void copyBuffer(std::vector<uchar>& buffer, ImageBuffer* image_buffer, const ros::Time& timestamp);
 
   /**
+   * @brief Rotate input image by 180 degrees.
+   * @param input image
+   * @param output image
+   */
+  void invertImage(const cv::Mat& input, cv::Mat& output);
+
+  /**
    * @brief Send an error message.
    * @param fildescriptor fd to send the answer to
    * @param error number
