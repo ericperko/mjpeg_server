@@ -415,11 +415,15 @@ ImageBuffer* MJPEGServer::getImageBuffer(const std::string& topic)
 
 // rotate input image at 180 degrees
 void MJPEGServer::invertImage(const cv::Mat& input, cv::Mat& output) {
-  IplImage inputImage = input;
-  IplImage outputImage = output;
-  for (int j = 0; j < inputImage.height; ++j)
-    for (int i = 0; i < inputImage.width; ++i) {
-      outputImage.imageData[inputImage.height*inputImage.width - (i + j*inputImage.width) - 1] = inputImage.imageData[i + j*inputImage.width];
+
+  cv::Mat_<cv::Vec3b>& input_img = (cv::Mat_<cv::Vec3b>&)input; //3 channel pointer to image
+  cv::Mat_<cv::Vec3b>& output_img = (cv::Mat_<cv::Vec3b>&)output; //3 channel pointer to image
+  cv::Size size = input.size();
+
+  for (int j = 0; j < size.height; ++j)
+    for (int i = 0; i < size.width; ++i) {
+      //outputImage.imageData[size.height*size.width - (i + j*size.width) - 1] = inputImage.imageData[i + j*size.width];
+      output_img(size.width-i-1,size.height-i-1) = input_img(i,j);
     }
   return;
 }
@@ -576,7 +580,7 @@ void MJPEGServer::sendSnapshot(int fd, const char *parameter)
 
   std::string params = parameter;
   ParameterMap parameter_map;
-  decodeParameter(params, parameter_map);
+  decodeParameter(params, parameter_map);http://merry:8080/stream?topic=/remote_lab_cam1/image_raw?invert=1
 
   ParameterMap::iterator itp = parameter_map.find("topic");
   if (itp == parameter_map.end()) return;
