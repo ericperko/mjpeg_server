@@ -413,6 +413,16 @@ ImageBuffer* MJPEGServer::getImageBuffer(const std::string& topic)
   return image_buffer;
 }
 
+// rotate input image at 180 degrees
+void MJPEGServer::invertImage(const cv::Mat& input, cv::Mat& output) {
+  cv::Size size = input.size();
+  for (int j = 0; j < size.height; ++j)
+    for (int i = 0; i < size.width; ++i) {
+      output.data[size.height*size.width - (i + j*size.width) - 1] = input.data[i + j*size.width];
+    }
+  return;
+}
+
 void MJPEGServer::sendStream(int fd, const char *parameter)
 {
     unsigned char *frame = NULL, *tmp = NULL;
@@ -472,6 +482,16 @@ void MJPEGServer::sendStream(int fd, const char *parameter)
           cv::Mat img = image;
           std::vector<uchar> encoded_buffer;
           std::vector<int> encode_params;
+
+          // invert
+          int invert = 0;
+          if(parameter_map.find("invert") != parameter_map.end()) {
+            invert = stringToInt(parameter_map["invert"]);
+          }
+          if(invert) {
+            cv::Mat cloned_image = img.clone();
+            invertImage(cloned_image, img);
+          }
 
           // quality
           int quality = 95;
@@ -585,6 +605,16 @@ void MJPEGServer::sendSnapshot(int fd, const char *parameter)
   cv::Mat img = image;
   std::vector<uchar> encoded_buffer;
   std::vector<int> encode_params;
+
+  // invert
+  int invert = 0;
+  if(parameter_map.find("invert") != parameter_map.end()) {
+    invert = stringToInt(parameter_map["invert"]);
+  }
+  if(invert) {
+    cv::Mat cloned_image = img.clone();
+    invertImage(cloned_image, img);
+  }
 
   // quality
   int quality = 95;
