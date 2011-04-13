@@ -394,7 +394,10 @@ void MJPEGServer::decodeParameter(const std::string& parameter, ParameterMap& pa
   for(size_t i=0; i<parameter_value_pairs.size(); i++) {
     std::vector<std::string> parameter_value;
     splitString(parameter_value_pairs[i], parameter_value, "=");
-    if(parameter_value.size()==2) {
+    if(parameter_value.size()==1) {
+      parameter_map.insert(std::make_pair(parameter_value[0],std::string("")));
+    }
+    else if(parameter_value.size()==2) {
       parameter_map.insert(std::make_pair(parameter_value[0],parameter_value[1]));
     }
   }
@@ -423,7 +426,7 @@ void MJPEGServer::invertImage(const cv::Mat& input, cv::Mat& output) {
   for (int j = 0; j < size.height; ++j)
     for (int i = 0; i < size.width; ++i) {
       //outputImage.imageData[size.height*size.width - (i + j*size.width) - 1] = inputImage.imageData[i + j*size.width];
-      output_img(size.width-i-1,size.height-i-1) = input_img(i,j);
+      output_img(size.height-j-1, size.width-i-1) = input_img(j,i);
     }
   return;
 }
@@ -491,9 +494,6 @@ void MJPEGServer::sendStream(int fd, const char *parameter)
           // invert
           int invert = 0;
           if(parameter_map.find("invert") != parameter_map.end()) {
-            invert = stringToInt(parameter_map["invert"]);
-          }
-          if(invert) {
             cv::Mat cloned_image = img.clone();
             invertImage(cloned_image, img);
           }
@@ -614,9 +614,6 @@ void MJPEGServer::sendSnapshot(int fd, const char *parameter)
   // invert
   int invert = 0;
   if(parameter_map.find("invert") != parameter_map.end()) {
-    invert = stringToInt(parameter_map["invert"]);
-  }
-  if(invert) {
     cv::Mat cloned_image = img.clone();
     invertImage(cloned_image, img);
   }
