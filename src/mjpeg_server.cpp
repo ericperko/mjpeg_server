@@ -100,24 +100,6 @@ MJPEGServer::~MJPEGServer() {
   cleanUp();
 }
 
-void MJPEGServer::copyBuffer(std::vector<uchar>& buffer, ImageBuffer* image_buffer, const ros::Time& timestamp) {
-
-//  int buffer_size = buffer.size();
-//  if(buffer_size == 0)
-//    return;
-//
-//  // check if image buffer is large enough, increase it if necessary
-//  if(buffer_size > image_buffer->buffer_size_) {
-//    ROS_DEBUG("increasing buffer size to %d", buffer_size);
-//    image_buffer->buffer_ = (char*)realloc(image_buffer->buffer_, buffer_size);
-//    image_buffer->buffer_size_ = buffer_size;
-//  }
-//
-//  // copy image buffer
-//  memcpy(image_buffer->buffer_, &buffer[0], buffer_size);
-//  image_buffer->time_stamp_ = timestamp.toSec();
-}
-
 void MJPEGServer::imageCallback(const sensor_msgs::ImageConstPtr& msg, const std::string& topic) {
 
   ImageBuffer* image_buffer = getImageBuffer(topic);

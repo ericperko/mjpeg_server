@@ -148,7 +148,6 @@ private:
 
 
   void imageCallback(const sensor_msgs::ImageConstPtr& msg, const std::string& topic);
-  void copyBuffer(std::vector<uchar>& buffer, ImageBuffer* image_buffer, const ros::Time& timestamp);
 
   /**
    * @brief Rotate input image by 180 degrees.
