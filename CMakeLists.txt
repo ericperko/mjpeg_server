@@ -20,3 +20,5 @@ rosbuild_add_boost_directories()
 
 # mjpeg_server
 rosbuild_add_executable(mjpeg_server src/mjpeg_server.cpp)
+
+rosbuild_link_boost(${PROJECT_NAME} thread)

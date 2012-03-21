@@ -39,7 +39,8 @@
 #include <ros/ros.h>
 #include <sensor_msgs/Image.h>
 #include <image_transport/image_transport.h>
-#include <cv_bridge/CvBridge.h>
+//#include <cv_bridge/CvBridge.h>
+#include <cv_bridge/cv_bridge.h>
 
 #include <boost/thread/mutex.hpp>
 #include <boost/thread/condition.hpp>
@@ -52,7 +53,6 @@
 #define BUFFER_SIZE   1024
 
 namespace mjpeg_server {
-
 
 /* the webserver determines between these values for an answer */
 typedef enum {

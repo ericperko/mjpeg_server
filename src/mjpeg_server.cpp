@@ -48,17 +48,30 @@
 #include <netdb.h>
 #include <errno.h>
 
+#include <opencv2/opencv.hpp>
+
 #include <boost/thread.hpp>
 #include <boost/bind.hpp>
 
-#define ABS(a) (((a) < 0) ? -(a) : (a))
-#ifndef MIN
-#define MIN(a, b) (((a) < (b)) ? (a) : (b))
-#endif
-#ifndef MAX
-#define MAX(a, b) (((a) > (b)) ? (a) : (b))
-#endif
-#define LENGTH_OF(x) (sizeof(x)/sizeof(x[0]))
+template <typename T>
+inline T ABS(T a){ 
+    return (a < 0 ? -a : a);
+}
+
+template <typename T>
+inline T min(T a, T b){ 
+    return (a < b ? a : b);
+}
+
+template <typename T>
+inline T max(T a, T b){ 
+    return (a > b ? a : b);
+}
+
+template <typename T>
+inline T LENGTH_OF(T x){ 
+    return (sizeof(x)/sizeof(x[0]));
+}
 
 /* the boundary is used for the M-JPEG stream, it separates the multipart stream of pictures */
 #define BOUNDARY "boundarydonotcross"
@@ -164,14 +177,15 @@ void MJPEGServer::freeRequest(request *req)
 
 int MJPEGServer::readWithTimeout(int fd, iobuffer *iobuf, char *buffer, size_t len, int timeout)
 {
-    int copied = 0, rc, i;
+    size_t copied = 0;
+    int rc, i;
     fd_set fds;
     struct timeval tv;
 
     memset(buffer, 0, len);
 
     while((copied < len)) {
-        i = MIN(iobuf->level, len - copied);
+        i = min((size_t)iobuf->level, len - copied);
         memcpy(buffer + copied, iobuf->buffer + IO_BUFFER - iobuf->level, i);
 
         iobuf->level -= i;
@@ -215,7 +229,7 @@ int MJPEGServer::readWithTimeout(int fd, iobuffer *iobuf, char *buffer, size_t l
 int MJPEGServer::readLineWithTimeout(int fd, iobuffer *iobuf, char *buffer, size_t len, int timeout)
 {
     char c = '\0', *out = buffer;
-    int i;
+    unsigned int i;
 
     memset(buffer, 0, len);
 
@@ -419,7 +433,9 @@ void MJPEGServer::sendStream(int fd, const char *parameter)
     int frame_size = 0, max_frame_size = 0;
     char buffer[BUFFER_SIZE] = {0};
     struct timeval timestamp;
-    sensor_msgs::CvBridge image_bridge;
+    //sensor_msgs::CvBridge image_bridge;
+    //sensor_msgs::cv_bridge image_bridge;
+    cv_bridge::CvImage image_bridge;
 
     ROS_DEBUG("Decoding parameter");
 
@@ -453,10 +469,11 @@ void MJPEGServer::sendStream(int fd, const char *parameter)
           boost::unique_lock<boost::mutex> lock(image_buffer->mutex_);
           image_buffer->condition_.wait(lock);
 
-          IplImage* image;
+          //IplImage* image;
+          cv_bridge::CvImagePtr cv_msg;
           try {
-           if (image_bridge.fromImage(image_buffer->msg, "bgr8")) {
-             image = image_bridge.toIpl();
+           if (cv_msg = cv_bridge::toCvCopy(image_buffer->msg, "bgr8")) {
+             ;//image = image_bridge.toIpl();
            }
            else {
              ROS_ERROR("Unable to convert %s image to bgr8", image_buffer->msg.encoding.c_str());
@@ -469,12 +486,12 @@ void MJPEGServer::sendStream(int fd, const char *parameter)
           }
 
           // encode image
-          cv::Mat img = image;
+          cv::Mat img = cv_msg->image;
           std::vector<uchar> encoded_buffer;
           std::vector<int> encode_params;
 
           // invert
-          int invert = 0;
+          //int invert = 0;
           if(parameter_map.find("invert") != parameter_map.end()) {
             cv::Mat cloned_image = img.clone();
             invertImage(cloned_image, img);
@@ -558,11 +575,12 @@ void MJPEGServer::sendSnapshot(int fd, const char *parameter)
   int frame_size = 0;
   char buffer[BUFFER_SIZE] = {0};
   struct timeval timestamp;
-  sensor_msgs::CvBridge image_bridge;
+  //sensor_msgs::CvBridge image_bridge;
+  //sensor_msgs::cv_bridge image_bridge;
 
   std::string params = parameter;
   ParameterMap parameter_map;
-  decodeParameter(params, parameter_map);http://merry:8080/stream?topic=/remote_lab_cam1/image_raw?invert=1
+  decodeParameter(params, parameter_map); // http://merry:8080/stream?topic=/remote_lab_cam1/image_raw?invert=1
 
   ParameterMap::iterator itp = parameter_map.find("topic");
   if (itp == parameter_map.end()) return;
@@ -574,10 +592,11 @@ void MJPEGServer::sendSnapshot(int fd, const char *parameter)
   boost::unique_lock<boost::mutex> lock(image_buffer->mutex_);
   image_buffer->condition_.wait(lock);
 
-  IplImage* image;
+  //IplImage* image;
+  cv_bridge::CvImagePtr cv_msg;
   try {
-   if (image_bridge.fromImage(image_buffer->msg, "bgr8")) {
-     image = image_bridge.toIpl();
+   if (cv_msg = cv_bridge::toCvCopy(image_buffer->msg, "bgr8")) {
+     ;//image = image_bridge.toIpl();
    }
    else {
      ROS_ERROR("Unable to convert %s image to bgr8", image_buffer->msg.encoding.c_str());
@@ -589,12 +608,12 @@ void MJPEGServer::sendSnapshot(int fd, const char *parameter)
    return;
   }
 
-  cv::Mat img = image;
+  cv::Mat img = cv_msg->image;
   std::vector<uchar> encoded_buffer;
   std::vector<int> encode_params;
 
   // invert
-  int invert = 0;
+  //int invert = 0;
   if(parameter_map.find("invert") != parameter_map.end()) {
     cv::Mat cloned_image = img.clone();
     invertImage(cloned_image, img);
@@ -688,7 +707,7 @@ void MJPEGServer::client(int fd) {
         return;
     }
     pb += strlen("GET /"); // a pb points to the string after the first & after command
-    int len = MIN(MAX(strspn(pb, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ._/-1234567890?="), 0), 100);
+    int len = min(max((int)strspn(pb, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ._/-1234567890?="), 0), 100);
     req.parameter = (char*)malloc(len + 1);
     if(req.parameter == NULL) {
         exit(EXIT_FAILURE);
@@ -696,7 +715,7 @@ void MJPEGServer::client(int fd) {
     memset(req.parameter, 0, len + 1);
     strncpy(req.parameter, pb, len);
 
-    ROS_DEBUG("requested image topic: \"%s\"", len, req.parameter);
+    ROS_DEBUG("requested image topic[%d]: \"%s\"", len, req.parameter);
   }
   else if(strstr(buffer, "GET /stream?") != NULL) {
     req.type = A_STREAM;
@@ -709,7 +728,7 @@ void MJPEGServer::client(int fd) {
         return;
     }
     pb += strlen("GET /stream"); // a pb points to the string after the first & after command
-    int len = MIN(MAX(strspn(pb, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ._/-1234567890?="), 0), 100);
+    int len = min(max((int)strspn(pb, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ._/-1234567890?="), 0), 100);
     req.parameter = (char*)malloc(len + 1);
     if(req.parameter == NULL) {
         exit(EXIT_FAILURE);
@@ -717,7 +736,7 @@ void MJPEGServer::client(int fd) {
     memset(req.parameter, 0, len + 1);
     strncpy(req.parameter, pb, len);
 
-    ROS_DEBUG("requested image topic: \"%s\"", len, req.parameter);
+    ROS_DEBUG("requested image topic[%d]: \"%s\"", len, req.parameter);
   }
   else if(strstr(buffer, "GET /snapshot?") != NULL) {
     req.type = A_SNAPSHOT;
@@ -730,7 +749,7 @@ void MJPEGServer::client(int fd) {
         return;
     }
     pb += strlen("GET /snapshot"); // a pb points to the string after the first & after command
-    int len = MIN(MAX(strspn(pb, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ._/-1234567890?="), 0), 100);
+    int len = min(max((int)strspn(pb, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ._/-1234567890?="), 0), 100);
     req.parameter = (char*)malloc(len + 1);
     if(req.parameter == NULL) {
         exit(EXIT_FAILURE);
@@ -738,7 +757,7 @@ void MJPEGServer::client(int fd) {
     memset(req.parameter, 0, len + 1);
     strncpy(req.parameter, pb, len);
 
-    ROS_DEBUG("requested image topic: \"%s\"", len, req.parameter);
+    ROS_DEBUG("requested image topic[%d]: \"%s\"", len, req.parameter);
   }
 
   /*
